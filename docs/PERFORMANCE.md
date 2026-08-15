@@ -149,7 +149,8 @@ Reverted. (The serve script keeps it behind `CUDAGRAPH=1` for future A/B.)
 
 | Experiment | Result | Verdict |
 |---|---|---|
-| cudagraph FULL_AND_PIECEWISE (ryanzhou capture sizes to 3712) | cold prefill 2509 vs 3222 tok/s (worse); decode 129.9 vs 133.5 (flat); +10 GB VRAM (195.2/205.8 GB); +2 min startup | **rejected** — chunked prefill uses 4096-token chunks above the 3712 graph max, so prefill stays eager; upstream's 11.5K tok/s depends on 3712-quantum alignment we don't have |
+| cudagraph FULL_AND_PIECEWISE (ryanzhou capture sizes to 3712) | cold prefill 2509 vs 3222 tok/s (worse); decode 129.9 vs 133.5 (flat); +10 GB VRAM (195.2/205.8 GB); +2 min startup | **rejected** — chunked prefill uses 4096-token chunks above the 3712 graph max, so prefill stays eager |
+| cudagraph + capture sizes extended to 4096 (block-256 aligned) | cold prefill 2504 tok/s (still worse than 3222); decode 129.7 (flat) | **rejected** — even with the exact chunk size in the capture list, prefill graphs give nothing on this stack; upstream's 11.5K tok/s depends on scheduler/kernel differences we don't have |
 | DSpark K=5 (vs K=7) | decode-512 121.7 vs 133.5 tok/s | **rejected** — K=7 is the Pareto point for single-stream agent latency |
 | AITER tuning for M=1/2 decode shapes | tuner not shipped in the AITER wheel (`tuned_gemm.py` is the config loader only); upstream tuning harness (`gen_nsplit.py`, `bench_r3_nsplit.py`) lives outside the public clone | **deferred** — requires AITER source build + CK tooling; documented as the path to the last decode mile |
 

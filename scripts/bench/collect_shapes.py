@@ -33,7 +33,7 @@ for (M, N, K), c in cnt.most_common():
 
 # 对照 ryanzhou tuning CSV，看这些 shape 是否真的缺失
 print("\n=== 对照 ryanzhou tuning CSV ===")
-tuning_dir = "/mnt/workspace/deepseek-v4-flash-mi300x/tuning"
+tuning_dir = os.environ.get("PATCH_REPO", "/mnt/workspace/deepseek-v4-flash-mi300x") + "/tuning"
 if os.path.isdir(tuning_dir):
     for csv_file in sorted(os.listdir(tuning_dir)):
         if not csv_file.endswith(".csv"):

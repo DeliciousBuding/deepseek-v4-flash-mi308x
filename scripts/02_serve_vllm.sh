@@ -124,10 +124,12 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
   fi
 
   # CUDA graph 捕获(可选, 默认关): ryanzhou 生产用 FULL_AND_PIECEWISE + 显式捕获
-  # 尺寸表(到 M=3712)拿 prefill 图收益; 代价 ~+6GB 显存 + 启动编译时间。
+  # 尺寸表。注意: 上游捕获上限 3712 对应 block-16 布局; 我们 block-size=256,
+  # chunked prefill 的 chunk 正好是 4096, 因此追加 3840/4096 让 prefill 图命中。
+  # 代价 ~+6GB 显存 + 启动编译时间。
   if [ "${CUDAGRAPH:-0}" = "1" ]; then
-    EXTRA_ARGS+=(--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256,272,288,304,320,336,352,368,384,400,416,432,448,464,480,496,512,1664,2048,3072,3712],"max_cudagraph_capture_size":3712}')
-    echo "[cudagraph] FULL_AND_PIECEWISE (capture to M=3712)"
+    EXTRA_ARGS+=(--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256,272,288,304,320,336,352,368,384,400,416,432,448,464,480,496,512,1664,2048,3072,3712,3840,4096],"max_cudagraph_capture_size":4096}')
+    echo "[cudagraph] FULL_AND_PIECEWISE (capture to M=4096)"
   fi
 
   # 场景: 50K-500K 多轮长对话 agent coding, input 多 output 少, 高 cache 命中
