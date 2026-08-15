@@ -131,6 +131,8 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
   fi
 
   # 场景: 50K-500K 多轮长对话 agent coding, input 多 output 少, 高 cache 命中
+  DSPARK_K="${DSPARK_K:-7}"
+  echo "[dspark] K=${DSPARK_K}"
   exec vllm serve "$MODEL_PATH" \
     --served-model-name deepseek-v4-flash \
     --trust-remote-code \
@@ -151,7 +153,7 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
     --tool-call-parser deepseek_v4 \
     --enable-auto-tool-choice \
     --enable-prompt-tokens-details \
-    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --speculative-config "{\"method\":\"dspark\",\"num_speculative_tokens\":${DSPARK_K},\"draft_sample_method\":\"probabilistic\",\"rejection_sample_method\":\"block\"}" \
     --gpu-memory-utilization 0.95 \
     "${EXTRA_ARGS[@]}" \
     --api-key "$VLLM_API_KEY" \

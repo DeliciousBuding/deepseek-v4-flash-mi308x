@@ -137,19 +137,27 @@ C4 +30%.
 on dev306 yields no decode gain, adds 32s compile time and 6.24 GB VRAM.
 Reverted. (The serve script keeps it behind `CUDAGRAPH=1` for future A/B.)
 
+### v2 A/B round (2026-08-16)
+
+| Experiment | Result | Verdict |
+|---|---|---|
+| cudagraph FULL_AND_PIECEWISE (ryanzhou capture sizes to 3712) | cold prefill 2509 vs 3222 tok/s (worse); decode 129.9 vs 133.5 (flat); +10 GB VRAM (195.2/205.8 GB); +2 min startup | **rejected** — chunked prefill uses 4096-token chunks above the 3712 graph max, so prefill stays eager; upstream's 11.5K tok/s depends on 3712-quantum alignment we don't have |
+| DSpark K=5 (vs K=7) | decode-512 121.7 vs 133.5 tok/s | **rejected** — K=7 is the Pareto point for single-stream agent latency |
+| AITER tuning for M=1/2 decode shapes | tuner not shipped in the AITER wheel (`tuned_gemm.py` is the config loader only); upstream tuning harness (`gen_nsplit.py`, `bench_r3_nsplit.py`) lives outside the public clone | **deferred** — requires AITER source build + CK tooling; documented as the path to the last decode mile |
+
 ## Remaining bottlenecks
 
 | Problem | Current | Target (ryanzhou ref) | Gap | Root cause |
 |---|---|---|---|---|
-| Cold prefill (single stream) | ~3.3-5.2K tok/s | 11.5K tok/s | ~2.2-3.5x | cudagraph prefill graphs off; M=3712 graph buckets not captured |
-| Single-stream decode | ~133-142 tok/s | 168 tok/s | ~1.2x | decode GEMM shapes at M=1/2 partially tuned; wheel version delta |
+| Cold prefill (single stream) | ~3.3-5.2K tok/s | 11.5K tok/s | ~2.2-3.5x | 3712-quantum prefill graphs unavailable on this stack (cudagraph A/B rejected, see above) |
+| Single-stream decode | ~133-142 tok/s | 168 tok/s | ~1.2x | decode GEMM shapes at M=1/2 partially tuned; wheel version delta; tuning harness not available in-sandbox |
 
 Next steps:
 
-1. Re-test cudagraph FULL_AND_PIECEWISE with the explicit ryanzhou capture
-   sizes (`CUDAGRAPH=1`) now that the KV pool is pinned at 16 GB (frees the
-   VRAM the graphs need);
-2. AITER tuning for remaining M=1/2 decode shapes;
+1. AITER source-build tuning harness for the remaining M=1/2 decode shapes
+   (requires the AITER 0.1.19 source + CK tooling; upstream's own harness is
+   not published in the ryanzhou clone);
+2. watch ryanzhou upstream for prefill-graph-compatible stack updates;
 3. raise the CPU KV layer if the platform ever allows a larger `/dev/shm`.
 
 ## Summary

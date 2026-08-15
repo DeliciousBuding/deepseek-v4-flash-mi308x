@@ -174,6 +174,9 @@ echo "===== [10/10] 验证 + 打 tarball 备份到 NFS ====="
 echo "打 tarball 备份到 NFS(大文件写 NFS 快, 重启后 bootstrap.sh 恢复) ..."
 tar -cf /mnt/workspace/.venvs/vllm.tar.gz -C "$(dirname "$VENV")" "$(basename "$VENV")"
 echo "  ✓ /mnt/workspace/.venvs/vllm.tar.gz ($(du -sh /mnt/workspace/.venvs/vllm.tar.gz | cut -f1))"
+# AITER 运行时缓存也持久化(小), bootstrap 会恢复
+tar -cf /mnt/workspace/.venvs/aiter_cache.tar.gz -C /root/.aiter . 2>/dev/null || true
+echo "  ✓ /mnt/workspace/.venvs/aiter_cache.tar.gz"
 
 echo ""
 echo "=============================================="
