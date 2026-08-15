@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Model weights (large, downloaded at runtime — never committed)
+*.safetensors
+*.gguf
+*.pt
+*.ckpt
+*.bin
+*.whl
+models/
+
+# Generated artifacts
+*.log
+*.mp4
+outputs/
+out/
+
+# Secrets / local state
+.bootstrap/
+keys/
+*.key
+*.pem
+id_rsa*
+id_ed25519*
+authorized_keys
+known_hosts
+tailscaled.state
+.env
+.env.*
+
+# System
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
