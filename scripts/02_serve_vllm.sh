@@ -15,9 +15,10 @@ HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8000}"
 
 # ---- restore /opt/cj-moe kernel sources (local disk, restored from patch repo) ----
-if [ ! -d /opt/cj-moe ] && [ -d "${PATCH_REPO:-/mnt/workspace/deepseek-v4-flash-mi300x}/kernel-dev/hip-a8w4" ]; then
+PATCH_REPO_DIR="${PATCH_REPO:-/mnt/workspace/deepseek-v4-flash-mi300x}"
+if [ ! -d /opt/cj-moe ] && [ -d "$PATCH_REPO_DIR/kernel-dev/hip-a8w4" ]; then
   mkdir -p /opt/cj-moe
-  cp -r "${PATCH_REPO:-/mnt/workspace/deepseek-v4-flash-mi300x}/kernel-dev/hip-a8w4/." /opt/cj-moe/
+  cp -r "$PATCH_REPO_DIR/kernel-dev/hip-a8w4/." /opt/cj-moe/
 fi
 
 # ---- vLLM stack selection: nightly venv (patched) by default ----
@@ -89,24 +90,55 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
     echo "   bash 01_download_model.sh dsflash   # 只补缺失的 shard 31-48(~58G), 跳过已有的 1-30"
     exit 1
   fi
-  echo "启动 DeepSeek-V4-Flash-0731 (ryanhou 补丁栈: 前缀缓存 + DSpark-7 + 稀疏 MLA)"
+
+  # 死掉的 EngineCore 无法 unlink 自己的 CPU-KV mmap; 起服务前清掉残留
+  # (ryanzhou vllm-entrypoint.sh 同款处理, CPU offload 重启稳定性的前提)
+  find /dev/shm -maxdepth 1 -type f -name 'vllm_offload_*.mmap' -delete 2>/dev/null || true
+
+  echo "启动 DeepSeek-V4-Flash-0731 (patch stack: prefix cache + DSpark-7 + sparse MLA)"
   # ryanhou 生产栈环境变量(对应 compose.yaml):
   #   OPUS_PREFILL=1 → 用预编译的稀疏 prefill 内核(module_pa_sparse_prefill_opus942.so)
   #   SKINNY_GEMM=0  → 关 skinny GEMM(该 shape 在 gfx942 有精度问题)
-  #   AITER_CONFIG    → A8W8 blockscale GEMM 调优表(bpreshuffle)
+  #   AITER_CONFIG    → A8W8 blockscale GEMM 调优表
   export VLLM_ROCM_OPUS_PREFILL="${VLLM_ROCM_OPUS_PREFILL:-1}"
   export VLLM_ROCM_USE_SKINNY_GEMM="${VLLM_ROCM_USE_SKINNY_GEMM:-0}"
-  export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE="${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE:-/mnt/workspace/deepseek-v4-flash-mi300x/tuning/dsv4-mi300x-a8w8-blockscale-bpreshuffle-ck.batch4096.csv}"
-  export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE="${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE:-/mnt/workspace/deepseek-v4-flash-mi300x/tuning/dsv4-a8w8-blockscale-tuned-gemm.mi300x.decode-candidate.csv}"
+  export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE="${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE:-$PATCH_REPO_DIR/tuning/dsv4-mi300x-a8w8-blockscale-bpreshuffle-ck.batch4096.csv}"
+  export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE="${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE:-$PATCH_REPO_DIR/tuning/dsv4-a8w8-blockscale-tuned-gemm.mi300x.decode-candidate.csv}"
+
+  # CPU KV offload (P7): 与 ryanzhou 生产配置对齐 —— GPU 池用 --kv-cache-memory-bytes
+  # 固定 16GB, 溢出的 KV 经 native 后端落到 96GB CPU 层。单靠 --kv-offloading-size
+  # 而不 pin --kv-cache-memory-bytes 会把 GPU 池压到 8.1GB 装不下 512K(已实测回退)。
+  # A/B 开关: KV_OFFLOAD_GB=0 关闭 offload; 正数 = CPU 层 GB 数。
+  KV_OFFLOAD_GB="${KV_OFFLOAD_GB:-96}"
+  KV_CACHE_BYTES="${KV_CACHE_BYTES:-16000000000}"
+  EXTRA_ARGS=()
+  if [ "${KV_OFFLOAD_GB:-0}" -gt 0 ] 2>/dev/null; then
+    EXTRA_ARGS+=(--kv-cache-memory-bytes "$KV_CACHE_BYTES")
+    EXTRA_ARGS+=(--kv-offloading-size "$KV_OFFLOAD_GB")
+    EXTRA_ARGS+=(--kv-offloading-backend native)
+    echo "[kv-offload] CPU KV layer ${KV_OFFLOAD_GB}GB + GPU pool pinned $(($KV_CACHE_BYTES/1000000000))GB"
+  else
+    echo "[kv-offload] disabled (GPU-only)"
+  fi
+
+  # CUDA graph 捕获(可选, 默认关): ryanzhou 生产用 FULL_AND_PIECEWISE + 显式捕获
+  # 尺寸表(到 M=3712)拿 prefill 图收益; 代价 ~+6GB 显存 + 启动编译时间。
+  if [ "${CUDAGRAPH:-0}" = "1" ]; then
+    EXTRA_ARGS+=(--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256,272,288,304,320,336,352,368,384,400,416,432,448,464,480,496,512,1664,2048,3072,3712],"max_cudagraph_capture_size":3712}')
+    echo "[cudagraph] FULL_AND_PIECEWISE (capture to M=3712)"
+  fi
+
   # 场景: 50K-500K 多轮长对话 agent coding, input 多 output 少, 高 cache 命中
   exec vllm serve "$MODEL_PATH" \
     --served-model-name deepseek-v4-flash \
+    --trust-remote-code \
+    --generation-config vllm \
     --tensor-parallel-size 1 \
     --kv-cache-dtype fp8_ds_mla \
     --block-size 256 \
     --enable-prefix-caching \
     --max-model-len 524288 \
-    --max-num-seqs 8 \
+    --max-num-seqs "${MAX_NUM_SEQS:-64}" \
     --max-num-batched-tokens 4096 \
     --long-prefill-token-threshold 1024 \
     --moe-backend triton \
@@ -116,8 +148,10 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
     --reasoning-parser deepseek_v4 \
     --tool-call-parser deepseek_v4 \
     --enable-auto-tool-choice \
+    --enable-prompt-tokens-details \
     --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
     --gpu-memory-utilization 0.95 \
+    "${EXTRA_ARGS[@]}" \
     --api-key "$VLLM_API_KEY" \
     --host "$HOST" --port "$PORT"
   # 说明:
