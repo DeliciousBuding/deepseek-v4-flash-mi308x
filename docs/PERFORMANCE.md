@@ -81,6 +81,14 @@ instead of failing engine startup.
 This is the primary workload target: stable system/tool/repo prefix cached,
 per-turn cost dominated by decode.
 
+## TTFT isolation during long prefill (bench_ttft_isolation.py)
+
+A short request injected mid-way through a 200K-token prefill gets its first
+token in **1.96s vs 1.91s alone (+0.04s)** — the
+`--long-prefill-token-threshold 1024` scheduler slices the long prefill into
+1024-token chunks and slots the short request between chunks. Agent turns
+are not blocked by a colleague's 500K prefill.
+
 ## Concurrency
 
 | Concurrency | Aggregate tok/s | Per-stream tok/s | Notes |

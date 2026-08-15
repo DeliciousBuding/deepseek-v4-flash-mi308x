@@ -21,6 +21,7 @@ This repository is a **production recipe** for running DeepSeek-V4-Flash-0731 �
 - **512K context, verified.** 50K → 500K prompt ladder passes without crashes or OOM (see [docs/PERFORMANCE.md](docs/PERFORMANCE.md)).
 - **~133 tok/s single-stream decode** (incl. TTFT) with DSpark-7 speculative decoding; up to 446 tok/s aggregate at C8.
 - **0.32s hot TTFT** on a 30K-token stable agent prefix (34x vs cold) — per-turn agent latency is decode-bound.
+- **+0.04s TTFT isolation**: a short request mid-way through a 200K prefill gets its first token in 1.96s vs 1.91s alone.
 - **17.5x prefix-cache speedup** on repeated long prefixes (cold 8.7s → hot 0.5s).
 - **CPU KV offload**: pinned 16 GB GPU KV pool + native CPU layer (12 GB on this sandbox; upstream uses 96 GB on bare metal).
 - **No Docker.** Native `vllm serve` in an isolated venv that reuses the system ROCm torch.
@@ -130,6 +131,7 @@ Measured on a single MI308X (192 GB, ROCm 7.2.3) — see [docs/PERFORMANCE.md](d
 | Pure decode (agent harness) | ~142 tok/s |
 | Concurrency C1/C2/C4/C8 aggregate | 128 / 197 / 286 / 446 tok/s |
 | Agent multi-turn hot TTFT (30K stable prefix) | **0.32s** (34x vs cold) |
+| Short-request TTFT during 200K prefill | 1.96s vs 1.91s alone (**+0.04s**) |
 | Prefix cache (cold → hot) | 8.7s → 0.5s (**17.5x**) |
 | Long-context ladder 50K/128K/256K/384K/500K | all pass, 500K = 91.7s |
 
