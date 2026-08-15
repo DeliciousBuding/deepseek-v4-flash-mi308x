@@ -68,18 +68,23 @@ instead of failing engine startup.
 
 ## Coding-agent multi-turn session (bench_agent_trace.py)
 
-8-turn simulated agent session with a ~30K-token stable context prefix:
+30-turn simulated agent session with a ~20K-token stable context prefix,
+aligned with the Codex/SWE-bench Pro trace profile from the
+[vLLM x Mooncake agentic serving study](https://vllm-project.github.io/2026/05/06/mooncake-store.html)
+(131:1 input-to-output ratio, ~2.2K new tokens per turn, 94.2% reference hit rate):
 
-| Metric | Result |
-|---|---|
-| Cold turn-1 TTFT | 12.5s |
-| **Avg hot TTFT (turns 2-8)** | **0.32s** |
-| Hot vs cold total latency | **34.4x** |
-| Avg decode | 142 tok/s |
-| Session total (8 turns) | 16.7s |
+| Metric | Result | Reference |
+|---|---|---|
+| **Session prefix-cache hit rate** | **95.9%** | 94.2% (Mooncake) |
+| Cold turn-1 TTFT | ~13s | — |
+| **Avg hot TTFT (turns 2-30)** | **0.28s** | — |
+| Hot vs cold total latency | **34.3x** | 46x (P50, distributed pool) |
+| Avg decode | 119 tok/s | — |
+| Session total (30 turns) | 22.8s | — |
 
-This is the primary workload target: stable system/tool/repo prefix cached,
-per-turn cost dominated by decode.
+Per-turn cost is decode-bound once the stable prefix is cached; the hit rate
+exceeds the distributed-cache reference because a single-session workload
+never evicts its own prefix.
 
 ## TTFT isolation during long prefill (bench_ttft_isolation.py)
 

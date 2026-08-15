@@ -163,6 +163,42 @@ vllm-rocm-dsv4-flash/
 - `VLLM_ROCM_USE_AITER=1` enables the AITER MoE/FP8 kernels.
 - The venv lives on local disk for speed; a tarball snapshot is kept on persistent storage for restart recovery (see the private `infra` companion repo).
 
+## Serving coding agents (multi-turn, long context, tool calls)
+
+Findings validated against this stack; references at the bottom.
+
+- **Prompt structure decides cache hits.** Keep the stable part first
+  (system prompt + tool schemas + repo context), append the growing part
+  last (history, tool results). The engine hashes token-prefix blocks — the
+  same prefix from a different conversation ID still hits. Measured session
+  hit rate: **95.9%** (30-turn agent trace, vs the 94.2% reference from the
+  vLLM x Mooncake agentic study).
+- **Multi-tenant isolation with `cache_salt`.** If several agents/users
+  share the endpoint, pass a per-agent `cache_salt` in the request body —
+  vLLM injects it into the first-block hash, so cache reuse stays inside a
+  trust group and timing side-channels are closed
+  (vLLM PR #17045 / CVE-2025-46570). Omit it for a single-user deployment;
+  `scripts/bench/bench_agent_trace.py --salt <value>` exercises it.
+- **Speculative decoding is the single-stream lever.** DSpark-7 is the
+  DeepSeek-recommended method for low-concurrency agent serving (60–85%
+  per-user speedup over MTP-1 in DeepSeek production; ~1.5-1.76x in
+  third-party single-stream benchmarks). K=7 beat K=5 on our hardware.
+- **TTFT isolation matters for mixed workloads.** A short request during a
+  200K prefill sees +0.04s TTFT overhead thanks to
+  `--long-prefill-token-threshold 1024`.
+- **Beyond one GPU**: distributed KV pools (vLLM x Mooncake) push agentic
+  hit rates to 92%+ under round-robin multi-instance routing; tool-call idle
+  windows are the offload sweet spot (MORI). Out of scope for a single
+  MI308X, listed as the scaling path.
+
+## References
+
+- [Serving Agentic Workloads at Scale with vLLM x Mooncake](https://vllm-project.github.io/2026/05/06/mooncake-store.html) — Codex/SWE-bench Pro trace profile (131:1 in/out, 2.2K tokens/turn, 94.2% hit rate)
+- [vLLM Automatic Prefix Caching](https://docs.vllm.ai/en/stable/design/prefix_caching/) — hash design, `--prefix-caching-hash-algo`, `cache_salt`
+- [vLLM PR #17045: cache salting](https://github.com/vllm-project/vllm/pull/17045) — side-channel mitigation (CVE-2025-46570)
+- [DSpark: Confidence-Scheduled Speculative Decoding](https://arxiv.org/html/2607.05147) — DeepSeek-V4 serving; 60–85% per-user speedup vs MTP-1
+- [MORI: Exploiting Tool-Call Idle Windows for Offloading](https://arxiv.org/html/2606.00866) — phase-aware KV offload for agent serving
+
 ## Contributing
 
 Bug reports and patches are welcome — especially anything that closes the 133 → 168 tok/s gap. See [CONTRIBUTING.md](CONTRIBUTING.md).

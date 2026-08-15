@@ -2,25 +2,28 @@
 """bench_agent_trace.py — coding-agent multi-turn session benchmark.
 
 Simulates a realistic coding-agent workload against the OpenAI-compatible
-endpoint: a large stable prefix (system prompt + tool schema + repo context)
-sent every turn, with a growing conversation history and periodic tool
-results appended. The stable prefix must hit the vLLM prefix cache; the
-growing tail must not.
+endpoint, aligned with the trace profile from the vLLM x Mooncake agentic
+serving study (Codex/SWE-bench Pro corpus):
 
-Measures per turn:
-  - total latency (TTFT + decode)
-  - TTFT (time to first token, via streaming)
-  - decode tok/s
-  - aggregate session tok/s
-  - prefix-cache effectiveness (hot vs cold total latency)
+  - stable prefix: system prompt + tool schema + repo context (reused every
+    turn; must hit the prefix cache)
+  - per-turn delta: ~2K new tokens (user message + tool results)
+  - output: coding-sized completions
+  - 131:1 aggregate input-to-output ratio is typical; 94%+ hit rate is the
+    reference target for a well-structured agent trace
+
+Measures per turn: total latency, TTFT (streaming), decode tok/s, and the
+session-wide prefix-cache hit rate (sampled from /metrics).
 
 Env overrides: VLLM_API_KEY / VLLM_API_KEY_FILE, VLLM_BASE_URL.
 Usage:
-  python3 bench_agent_trace.py [turns] [context_tokens] [tool_call_every_n]
-Defaults: 12 turns, ~30K context prefix, tool call every 4th turn.
+  python3 bench_agent_trace.py [turns] [prefix_tokens] [--salt SALT]
+Defaults: 30 turns, ~20K stable prefix, output 256 tokens/turn.
 """
+import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -60,16 +63,31 @@ def make_repo_context(target_tokens: int) -> str:
     return REPO_UNIT * max(1, target_tokens // 40)
 
 
-def chat_stream(messages, max_tokens=512, temperature=0.0):
-    body = json.dumps({
+def cache_hit_metrics() -> tuple[int, int] | None:
+    """(hits, queries) counters from /metrics."""
+    try:
+        txt = urllib.request.urlopen(BASE + "/metrics", timeout=10).read().decode()
+    except Exception:
+        return None
+    def counter(name: str) -> int:
+        m = re.search(r"^vllm:%s_total\S*\s([0-9.e+]+)$" % name, txt, re.M)
+        return float(m.group(1)) if m else 0.0
+    return counter("prefix_cache_hits"), counter("prefix_cache_queries")
+
+
+def chat_stream(messages, max_tokens=256, temperature=0.0, salt=None):
+    body = {
         "model": MODEL,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": True,
         "stream_options": {"include_usage": True},
-    }).encode()
-    req = urllib.request.Request(BASE + "/v1/chat/completions", data=body, headers={
+    }
+    if salt:
+        body["cache_salt"] = salt
+    req = urllib.request.Request(BASE + "/v1/chat/completions",
+                                 data=json.dumps(body).encode(), headers={
         "Content-Type": "application/json",
         "Authorization": "Bearer " + KEY,
     })
@@ -106,16 +124,19 @@ def chat_stream(messages, max_tokens=512, temperature=0.0):
 
 
 def main():
-    turns = int(sys.argv[1]) if len(sys.argv) > 1 else 12
-    context_tokens = int(sys.argv[2]) if len(sys.argv) > 2 else 30000
-    tool_every_n = int(sys.argv[3]) if len(sys.argv) > 3 else 4
+    parser = argparse.ArgumentParser(description="coding-agent multi-turn bench")
+    parser.add_argument("turns", nargs="?", type=int, default=30)
+    parser.add_argument("prefix_tokens", nargs="?", type=int, default=20000)
+    parser.add_argument("--salt", help="per-session cache_salt (multi-tenant isolation)")
+    args = parser.parse_args()
 
-    repo_context = make_repo_context(context_tokens)
+    repo_context = make_repo_context(args.prefix_tokens)
     history = [{"role": "system", "content": SYSTEM_PROMPT + TOOL_SCHEMA}]
     results = []
+    hits0 = cache_hit_metrics()
     t_session = time.time()
 
-    for turn in range(1, turns + 1):
+    for turn in range(1, args.turns + 1):
         user_turn = (
             f"[turn {turn}] Analyze handlers/auth.go for a subtle token-refresh "
             f"race and propose a fix with tests."
@@ -124,16 +145,15 @@ def main():
         # Stable prefix stays first; growing context tail goes after it.
         messages[0]["content"] = SYSTEM_PROMPT + TOOL_SCHEMA + repo_context
 
-        r = chat_stream(messages, max_tokens=256)
+        r = chat_stream(messages, max_tokens=256, salt=args.salt)
         results.append(r)
 
-        # Append assistant reply + (every tool_every_n) a simulated tool result.
         history.append({"role": "user", "content": user_turn})
         history.append({
             "role": "assistant",
             "content": f"turn-{turn} analysis (placeholder reply)",
         })
-        if turn % tool_every_n == 0:
+        if turn % 4 == 0:
             history.append({
                 "role": "tool",
                 "content": f"read_file(handlers/auth.go) -> {turn * 37} bytes "
@@ -149,16 +169,24 @@ def main():
         )
 
     session_s = time.time() - t_session
+    hits1 = cache_hit_metrics()
     total_tokens = sum(r["n_tokens"] for r in results)
     avg_ttft = sum(r["ttft"] for r in results[1:]) / max(1, len(results) - 1)
     avg_decode = sum(r["decode_tok_s"] for r in results) / len(results)
     speedup = results[0]["total"] / results[-1]["total"]
     print()
-    print(f"=== session summary ({turns} turns, ~{context_tokens} ctx prefix) ===")
+    print(f"=== session summary ({args.turns} turns, ~{args.prefix_tokens} "
+          f"ctx prefix, salt={args.salt or 'none'}) ===")
     print(f"session total: {session_s:.1f}s, {total_tokens} completion tokens")
     print(f"avg hot TTFT: {avg_ttft:.2f}s")
     print(f"avg decode: {avg_decode:.1f} tok/s")
     print(f"hot vs cold total latency: {speedup:.1f}x")
+    if hits0 and hits1:
+        dh = hits1[0] - hits0[0]
+        dq = hits1[1] - hits0[1]
+        rate = 100 * dh / dq if dq else 0.0
+        print(f"session prefix-cache hit rate: {rate:.1f}% "
+              f"({dh:.0f}/{dq:.0f} queries) [reference: 94% on agent traces]")
 
 
 if __name__ == "__main__":
