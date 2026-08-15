@@ -93,6 +93,7 @@ fi
 echo ""
 echo "===== [5/8] 套用 ryanhou Python 补丁(byte-for-byte 覆盖) ====="
 # 映射表: "源文件名|目标相对 site-packages 路径"
+# 源查找顺序: 本仓库 patches/ 优先(自有环境补丁), 其次 ryanzhou 补丁仓库。
 PATCHES=(
   "gpt_oss_triton_kernels_moe.row-i8asym-candidate.py|vllm/model_executor/layers/fused_moe/experts/gpt_oss_triton_kernels_moe.py"
   "mxfp4.fused-silu.py|vllm/model_executor/layers/fused_moe/oracle/mxfp4.py"
@@ -111,13 +112,20 @@ PATCHES=(
   "spec-decode-utils.independent-draft-gumbel.py|vllm/v1/worker/gpu/spec_decode/utils.py"
   "kv_offload_cpu_gpu_worker.load-war.py|vllm/v1/kv_offload/cpu/gpu_worker.py"
   "scheduler.contention-aware.py|vllm/v1/core/sched/scheduler.py"
+  "shared_offload_region.madvise-tolerant.py|vllm/v1/kv_offload/cpu/shared_offload_region.py"
 )
+OWN_PATCHES="${OWN_PATCHES:-$(dirname "$(readlink -f "$0")")/../patches}"
 for entry in "${PATCHES[@]}"; do
   src="${entry%%|*}"
   dst="${entry##*|}"
+  if [ -f "$OWN_PATCHES/$src" ]; then
+    patch_src="$OWN_PATCHES/$src"
+  else
+    patch_src="$REPO/patches/$src"
+  fi
   mkdir -p "$SITE/$(dirname "$dst")"
-  cp -f "$REPO/patches/$src" "$SITE/$dst"
-  echo "  ✓ $dst"
+  cp -f "$patch_src" "$SITE/$dst"
+  echo "  ✓ $dst  ($patch_src)"
 done
 
 # 二进制补丁: topk-tiebreak 修复(崩溃根因)

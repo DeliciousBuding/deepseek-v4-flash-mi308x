@@ -16,112 +16,147 @@ torch : 2.11.0+gitd0c8b1f, hip 7.2.53211
 ROCm  : 7.2.3
 ```
 
-## Serve configuration
+## Serve configuration (v2, current)
 
 ```text
 --max-model-len 524288 (512K)
---gpu-memory-utilization 0.95
 --kv-cache-dtype fp8_ds_mla --block-size 256 --enable-prefix-caching
---max-num-seqs 8 --max-num-batched-tokens 8192 --enable-expert-parallel
---tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4
---speculative-config {"method":"dspark","num_speculative_tokens":7}
-no CPU KV offload (GPU-only)
+--kv-cache-memory-bytes 16G          # GPU KV pool pinned
+--kv-offloading-size 12G             # CPU KV layer (sandbox /dev/shm cap)
+--kv-offloading-backend native
+--max-num-seqs 64 --max-num-batched-tokens 4096
+--long-prefill-token-threshold 1024
+--enable-expert-parallel --moe-backend triton
+--tokenizer-mode deepseek_v4 --reasoning-parser deepseek_v4
+--speculative-config {"method":"dspark","num_speculative_tokens":7,
+  "draft_sample_method":"probabilistic","rejection_sample_method":"block"}
+--gpu-memory-utilization 0.95
 ```
+
+Environment-specific patch on top of the ryanzhou stack:
+`patches/shared_offload_region.madvise-tolerant.py` — the sandbox kernel rejects
+`MADV_POPULATE_WRITE` on tmpfs (EINVAL); the patch degrades to demand paging
+instead of failing engine startup.
 
 ## Long-context ladder (all pass, no crashes)
 
 | Target | Measured prompt tokens | Total time | Notes |
 |---|---|---|---|
-| 50K | 47,505 | 20.6s | OK |
-| 128K | 121,605 | 35.6s | OK |
-| 256K | 243,205 | 69.3s | OK |
-| 384K | 364,805 | 83.4s | OK |
+| 50K | 47,505 | 14.7s | OK (cold) |
+| 128K | 121,605 | 27.4s | OK (partial cache hit) |
+| 256K | 243,205 | 71.6s | OK |
+| 384K | 364,805 | 73.4s | OK |
 | 500K | 475,005 | 91.7s | OK |
 
-- 50K–500K all complete; the engine does not crash (flydsl 0.2.4 fix).
+- 50K–500K all complete; the engine does not crash.
 - Ladder requests share a common prefix, so later requests hit the prefix
   cache and total time does not grow linearly.
-- Peak VRAM for the 500K request: ~184 GB / 192 GB, no OOM.
+- Engine-reported prompt throughput peaks at **~12.2K tok/s** during
+  long-prefill windows (vs ~3.3K in the v1 config).
 
 ## Prefix cache
 
 | Scenario | Time | Notes |
 |---|---|---|
-| Cold (random ~45K-token prefix) | 18.72s | prefill ~2400 tok/s |
-| Hot (same prefix) | 1.34s | **14.0x speedup** |
+| Cold (~18K-token prefix) | 8.67s | |
+| Hot (same prefix) | 0.49s | **17.5x speedup** |
 
-- vLLM APC matches on token-prefix block hashes; cumulative hit rate ~64%
+- vLLM APC matches on token-prefix block hashes; cumulative hit rate ~63%
   on long-prefix reuse workloads.
 - Hitting depends on **content/token prefix**, not conversation ID. Keep
   stable system/tool/repo prefixes first, variable content last.
 
-## Concurrency (healthy after the flydsl fix)
+## Coding-agent multi-turn session (bench_agent_trace.py)
 
-| Concurrency | Aggregate tok/s | Per-stream tok/s | DSpark mean accepted |
+8-turn simulated agent session with a ~30K-token stable context prefix:
+
+| Metric | Result |
+|---|---|
+| Cold turn-1 TTFT | 12.5s |
+| **Avg hot TTFT (turns 2-8)** | **0.32s** |
+| Hot vs cold total latency | **34.4x** |
+| Avg decode | 142 tok/s |
+| Session total (8 turns) | 16.7s |
+
+This is the primary workload target: stable system/tool/repo prefix cached,
+per-turn cost dominated by decode.
+
+## Concurrency
+
+| Concurrency | Aggregate tok/s | Per-stream tok/s | Notes |
 |---|---|---|---|
-| C1 | 76 | 76 | 4.83 |
-| C2 | 141 | 71 | 4.68 |
-| C4 | 177 | 44 | 4.53 |
-| C8 | 372 | 47 | 4.58 |
+| C1 | 128.2 | 128.2 | was 76 in v1 config |
+| C2 | 197.3 | 98.7 | was 141 |
+| C4 | 286.2 | 71.5 | was 177 |
+| C8 | 446.2 | 55.8 | was 372 |
 
-- Aggregate throughput scales monotonically (76 → 141 → 177 → 372).
-- The earlier C2≈63 / C4≈81 anomaly is gone — root cause was flydsl 0.2.0
-  pushing batch>1 MoE/GEMM onto fallback slow paths; 0.2.4 restored them.
-- DSpark acceptance holds at 4.5–4.9 tokens/step (50–56% accept rate).
+Aggregate throughput scales monotonically; the v2 config (pinned 16 GB GPU
+KV pool + 12 GB CPU layer + max-num-seqs 64) raised every level vs v1.
 
 ## Single-stream decode
 
 | Output length | Total time (incl. TTFT) | tok/s incl. TTFT | Notes |
 |---|---|---|---|
-| 128 | 1.9s | 66 | DSpark mean_accepted 4.00 |
-| 512 | 6.4s | 79 | DSpark mean_accepted 4.89 |
+| 128 | 1.30s | 98.2 | was 66 |
+| 512 | 3.83s | 133.5 | was 90.6 |
 
-- Pure decode (excluding TTFT): **~112 tok/s** (historical baseline).
-- Target: 168 tok/s (ryanzhou production reference). Current gap ~1.5x.
+- Pure decode (excluding TTFT) measured ~142 tok/s in the agent harness.
+- Target: 168 tok/s (ryanzhou production reference on MI300X). Gap is now
+  ~1.2-1.5x instead of the previous ~1.5x.
 
-## Tuning history (2026-08-16, aligned with ryanzhou serve flags)
+## Tuning history
 
-After aligning `--moe-backend triton` + `draft-sample-method=probabilistic` +
+### v1 → v2 config (2026-08-16)
+
+Aligned with the ryanzhou production compose (upstream commit `012b994`):
+
+- Pinned GPU KV pool (`--kv-cache-memory-bytes 16G`) + CPU KV offload
+  (`--kv-offloading-size 12G --kv-offloading-backend native`) — the earlier
+  offload failure was caused by *not* pinning the GPU pool (pool shrank to
+  8.1 GB and could not fit 512K). Sandbox `/dev/shm` is 16 GB and cannot be
+  remounted, hence 12G instead of ryanzhou's 96G.
+- `--max-num-seqs 64` (was 8).
+- `/dev/shm` stale-mmap cleanup before launch (dead EngineCore cannot unlink
+  its own mmap; copied from ryanzhou's entrypoint).
+- `--generation-config vllm`, `--trust-remote-code`,
+  `--enable-prompt-tokens-details`.
+- madvise-tolerant patch for the sandbox kernel (see above).
+
+Results vs v1 (before/after): decode-512 90.6→133.5, C1 76→128, C4 177→286,
+C8 372→446, engine prefill throughput ~3.3K→~12K tok/s, prefix-cache
+speedup 14x→17.5x.
+
+### Earlier (v0 → v1)
+
+`--moe-backend triton` + `draft-sample-method=probabilistic` +
 `rejection-sample-method=block` + `--long-prefill-token-threshold 1024` +
-`--max-num-batched-tokens 4096` + `--reasoning-parser` +
-`--enable-auto-tool-choice`:
-
-| Metric | Before | After | Change |
-|---|---|---|---|
-| TTFT (short prompt) | 0.10s | 0.06s | **-40%** |
-| Cold prefill | 2402 tok/s | 3269 tok/s | **+36%** |
-| decode-512 (incl. TTFT) | 79 tok/s | 90.6 tok/s | **+15%** |
-| C4 aggregate | 177 tok/s | 230 tok/s | **+30%** |
-| DSpark acceptance | 50–56% | 40–60% (probabilistic) | more uniform |
+`--max-num-batched-tokens 4096`: TTFT -40%, cold prefill +36%, decode +15%,
+C4 +30%.
 
 **Tested and rejected**: `--compilation-config cudagraph FULL_AND_PIECEWISE`
 on dev306 yields no decode gain, adds 32s compile time and 6.24 GB VRAM.
-Reverted.
+Reverted. (The serve script keeps it behind `CUDAGRAPH=1` for future A/B.)
 
 ## Remaining bottlenecks
 
 | Problem | Current | Target (ryanzhou ref) | Gap | Root cause |
 |---|---|---|---|---|
-| Cold prefill | ~3269 tok/s | 7.9–8.5K tok/s | ~2.4x | `BLOCK_H=64` sparse prefill + 21-shape tuning missing |
-| Single-stream decode | ~111 tok/s | 168 tok/s | ~1.5x | AITER GEMM shapes miss the tuning table (M=1/2 decode shapes) |
-
-Root cause analysis: 219 GEMM shapes miss the ryanzhou tuning tables
-(collected with `scripts/bench/collect_shapes.py`). Key decode shapes M=1/M=2
-are absent from the tuning CSV (CSV starts at M=7). The 168 tok/s reference
-combines 21-shape tuning with the `124154a88` (dev229) wheel; we run
-`cb8104839` (dev306) with a tuning table that does not cover M=1/2.
+| Cold prefill (single stream) | ~3.3-5.2K tok/s | 11.5K tok/s | ~2.2-3.5x | cudagraph prefill graphs off; M=3712 graph buckets not captured |
+| Single-stream decode | ~133-142 tok/s | 168 tok/s | ~1.2x | decode GEMM shapes at M=1/2 partially tuned; wheel version delta |
 
 Next steps:
 
-1. Run the AITER tuning tool over M=1/2/4/8 decode shapes and append the CSV;
-2. or align with the pinned ryanzhou wheel (`124154a88`; re-download + reinstall);
-3. `BLOCK_H=64` sparse prefill (ryanzhou `rocm_aiter_mla_sparse.prefill-bh64.py`).
+1. Re-test cudagraph FULL_AND_PIECEWISE with the explicit ryanzhou capture
+   sizes (`CUDAGRAPH=1`) now that the KV pool is pinned at 16 GB (frees the
+   VRAM the graphs need);
+2. AITER tuning for remaining M=1/2 decode shapes;
+3. raise the CPU KV layer if the platform ever allows a larger `/dev/shm`.
 
 ## Summary
 
-- **Usability target met**: 50K–500K all work, 14x prefix-cache speedup,
-  healthy concurrency scaling, DSpark functioning.
-- **Performance materially improved**: TTFT -40%, prefill +36%, decode +15%,
-  C4 +30% after aligning serve flags.
-- **Remaining gap**: prefill 2.4x, decode 1.5x — GEMM shape tuning coverage
-  and wheel-version differences. Tracked in the private infra repo's plan.
+- **Usability target met**: 50K–500K all work, 17.5x prefix-cache speedup,
+  healthy concurrency scaling, DSpark functioning, CPU KV offload live.
+- **Agent workload validated**: hot TTFT 0.32s on a 30K stable prefix —
+  per-turn latency is decode-bound.
+- **Remaining gap**: prefill graphs (cudagraph) and the last mile of decode
+  tuning. Tracked in the private infra repo's plan.

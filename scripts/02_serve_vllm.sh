@@ -105,11 +105,13 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
   export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE="${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE:-$PATCH_REPO_DIR/tuning/dsv4-mi300x-a8w8-blockscale-bpreshuffle-ck.batch4096.csv}"
   export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE="${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE:-$PATCH_REPO_DIR/tuning/dsv4-a8w8-blockscale-tuned-gemm.mi300x.decode-candidate.csv}"
 
-  # CPU KV offload (P7): 与 ryanzhou 生产配置对齐 —— GPU 池用 --kv-cache-memory-bytes
-  # 固定 16GB, 溢出的 KV 经 native 后端落到 96GB CPU 层。单靠 --kv-offloading-size
+  # CPU KV offload (P7): 与 ryanzhou 生产对齐 —— GPU 池用 --kv-cache-memory-bytes
+  # 固定 16GB, 溢出的 KV 经 native 后端落到 CPU 层。单靠 --kv-offloading-size
   # 而不 pin --kv-cache-memory-bytes 会把 GPU 池压到 8.1GB 装不下 512K(已实测回退)。
+  # 注意: 沙箱 /dev/shm 只有 16GB 且不可扩容, offload 文件落在 /dev/shm,
+  #       所以 CPU 层默认 12GB(留余量), 而非 ryanzhou 生产机的 96GB。
   # A/B 开关: KV_OFFLOAD_GB=0 关闭 offload; 正数 = CPU 层 GB 数。
-  KV_OFFLOAD_GB="${KV_OFFLOAD_GB:-96}"
+  KV_OFFLOAD_GB="${KV_OFFLOAD_GB:-12}"
   KV_CACHE_BYTES="${KV_CACHE_BYTES:-16000000000}"
   EXTRA_ARGS=()
   if [ "${KV_OFFLOAD_GB:-0}" -gt 0 ] 2>/dev/null; then

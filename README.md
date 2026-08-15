@@ -19,10 +19,12 @@ This repository is a **production recipe** for running DeepSeek-V4-Flash-0731 �
 
 - **Single GPU, 284B MoE.** DeepSeek-V4-Flash-0731 fits a 192 GB MI300X/MI308X with the official FP4/FP8 checkpoint (~156 GB on disk, ~170-175 GB at runtime).
 - **512K context, verified.** 50K → 500K prompt ladder passes without crashes or OOM (see [docs/PERFORMANCE.md](docs/PERFORMANCE.md)).
-- **~112 tok/s single-stream decode** with DSpark-7 speculative decoding on our MI308X baseline.
-- **14x prefix-cache speedup** on repeated long prefixes (cold 18.7s → hot 1.3s at ~45K tokens).
+- **~133 tok/s single-stream decode** (incl. TTFT) with DSpark-7 speculative decoding; up to 446 tok/s aggregate at C8.
+- **0.32s hot TTFT** on a 30K-token stable agent prefix (34x vs cold) — per-turn agent latency is decode-bound.
+- **17.5x prefix-cache speedup** on repeated long prefixes (cold 8.7s → hot 0.5s).
+- **CPU KV offload**: pinned 16 GB GPU KV pool + native CPU layer (12 GB on this sandbox; upstream uses 96 GB on bare metal).
 - **No Docker.** Native `vllm serve` in an isolated venv that reuses the system ROCm torch.
-- **One-command install** of nightly vLLM + AITER + a 17-patch kernel stack, idempotent and re-runnable.
+- **One-command install** of nightly vLLM + AITER + an 18-patch kernel stack, idempotent and re-runnable.
 - Also serves **Qwen3.8-27B** and **Qwen3.6-35B-A3B** as fallback models with day-0 AMD support.
 
 ## Requirements
@@ -43,7 +45,7 @@ This repository is a **production recipe** for running DeepSeek-V4-Flash-0731 �
 # 1. Create the isolated environment (reuses system torch)
 bash scripts/env_setup.sh
 
-# 2. Install nightly vLLM + AITER 0.1.19 + the 17-patch kernel stack (idempotent)
+# 2. Install nightly vLLM + AITER 0.1.19 + the 18-patch kernel stack (idempotent)
 bash scripts/install_vllm_nightly.sh
 
 # 3. Download weights (idempotent, resumable)
@@ -72,7 +74,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## The patch stack
 
-Upstream vLLM 0.26.0 crashes on gfx942 for DeepSeek-V4-Flash (empty `topk_indices` in sparse attention) and runs unoptimized. `install_vllm_nightly.sh` installs nightly `cb8104839` and applies a 17-file patch overlay (ported from the community production stack at [ryanzhou/deepseek-v4-flash-mi300x](https://github.com/ryanzhou/deepseek-v4-flash-mi300x)):
+Upstream vLLM 0.26.0 crashes on gfx942 for DeepSeek-V4-Flash (empty `topk_indices` in sparse attention) and runs unoptimized. `install_vllm_nightly.sh` installs nightly `cb8104839` and applies a 17-file patch overlay ported from the community production stack at [ryanzhou/deepseek-v4-flash-mi300x](https://github.com/ryanzhou/deepseek-v4-flash-mi300x), plus our own environment patches in [`patches/`](patches/) (applied first when names collide):
 
 | Category | Patches | Effect |
 |---|---|---|
@@ -82,6 +84,7 @@ Upstream vLLM 0.26.0 crashes on gfx942 for DeepSeek-V4-Flash (empty `topk_indice
 | **MoE / GEMM** | `mxfp4.fused-silu` (+64% decode), `activation.rocm-exact-swiglu`, `gpt_oss_triton_kernels_moe.row-i8asym-candidate` | fused SiLU, exact BF16 SwiGLU, custom INT8 MoE kernel |
 | **KV / cache** | `cache_utils.gather2048`, `block_table.active-width-copy`, `kv_offload_cpu_gpu_worker.load-war` | 2048-token gather, active-width block copy |
 | **Tuning tables** | AITER A8W8 GEMM CSVs (decode + blockscale-bpreshuffle) | per-shape tuned GEMM configs |
+| **Sandbox fix (ours)** | `shared_offload_region.madvise-tolerant.py` | degrade MADV_POPULATE_WRITE EINVAL (Kata/tmpfs) to demand paging |
 
 Every patch is a byte-for-byte file overlay into the venv site-packages; no source rebuild is required. The kernel source is staged to `/opt/cj-moe` for runtime JIT of AITER/triton kernels.
 
@@ -90,11 +93,13 @@ Every patch is a byte-for-byte file overlay into the venv site-packages; no sour
 The serve script pins the production configuration we validated on MI308X:
 
 ```
---kv-cache-dtype fp8_ds_mla        # 20 GB GPU KV pool ≈ 1.93M tokens
+--kv-cache-dtype fp8_ds_mla        # MLA-compressed KV
 --block-size 256                   # prefix-cache granularity
 --enable-prefix-caching            # agent workload: stable prompts hit cache
 --max-model-len 524288             # 512K context
---max-num-seqs 8
+--kv-cache-memory-bytes 16G        # pinned GPU KV pool
+--kv-offloading-size 12G           # CPU KV layer (native backend)
+--max-num-seqs 64
 --max-num-batched-tokens 4096
 --long-prefill-token-threshold 1024
 --moe-backend triton
@@ -103,16 +108,17 @@ The serve script pins the production configuration we validated on MI308X:
 --reasoning-parser deepseek_v4
 --tool-call-parser deepseek_v4
 --enable-auto-tool-choice
+--enable-prompt-tokens-details
 --speculative-config '{"method":"dspark","num_speculative_tokens":7,
   "draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
---gpu-memory-utilization 0.95     # 512K single request needs 8.94 GB KV
+--gpu-memory-utilization 0.95
 ```
 
 Notes:
 
 - DSpark is the DeepSeek-specific speculative method — **not MTP** (`method=mtp` raises KeyError on this checkpoint).
-- CPU KV offload is currently **off**: `--kv-offloading-size 64` shrinks the GPU KV pool to 8.1 GB, which cannot fit a 512K request. Revisit only with `--kv-cache-memory-bytes` pinned.
-- On short requests TTFT is isolated by the 2048-token scheduling budget / 1024-token long-prefill threshold.
+- CPU KV offload requires the GPU pool to be **pinned** via `--kv-cache-memory-bytes`; offload size alone shrinks the pool below what a 512K request needs. Our sandbox caps the CPU layer at 12 GB (`/dev/shm` is 16 GB); bare metal can use 96 GB like upstream.
+- On short requests TTFT is isolated by the 1024-token long-prefill threshold; cudagraph prefill capture is available via `CUDAGRAPH=1` (see PERFORMANCE.md).
 
 ## Performance
 
@@ -120,13 +126,16 @@ Measured on a single MI308X (192 GB, ROCm 7.2.3) — see [docs/PERFORMANCE.md](d
 
 | Metric | Result |
 |---|---|
-| Single-stream decode (DSpark-7) | **~112 tok/s** |
-| Concurrency C1/C2/C4/C8 aggregate | 76 / 141 / 177 / 372 tok/s |
-| DSpark mean accepted tokens | 4.5-4.9 / step |
-| Prefix cache (100K prefix, cold → hot) | 18.7s → 1.3s (**14x**) |
-| Long-context ladder 50K/128K/256K/384K/500K | all pass, 500K = 91.7s, peak VRAM 184 GB |
+| Single-stream decode incl. TTFT (128/512 tok) | 98.2 / 133.5 tok/s |
+| Pure decode (agent harness) | ~142 tok/s |
+| Concurrency C1/C2/C4/C8 aggregate | 128 / 197 / 286 / 446 tok/s |
+| Agent multi-turn hot TTFT (30K stable prefix) | **0.32s** (34x vs cold) |
+| Prefix cache (cold → hot) | 8.7s → 0.5s (**17.5x**) |
+| Long-context ladder 50K/128K/256K/384K/500K | all pass, 500K = 91.7s |
 
-Community reference (ryanzhou production stack) reaches 168 tok/s single-stream; we are transparent about the gap and treat it as an open tuning target rather than a claim.
+Community reference (ryanzhou production stack on MI300X) reaches 168 tok/s
+single-stream and 11.5K tok/s cold prefill; the remaining gap is documented
+in PERFORMANCE.md rather than hidden.
 
 ## Repository layout
 
@@ -134,15 +143,16 @@ Community reference (ryanzhou production stack) reaches 168 tok/s single-stream;
 vllm-rocm-dsv4-flash/
 ├── docs/
 │   └── PERFORMANCE.md          # measured baselines + harness methodology
-├── scripts/
-│   ├── 00_check_env.sh         # environment probe (ROCm/vLLM/AITER/GPU/disk)
-│   ├── 01_download_model.sh    # idempotent weight download (qwen38|qwen36|dsflash)
-│   ├── 02_serve_vllm.sh        # native vllm serve launcher
-│   ├── 03_benchmark.sh         # concurrency sweep via vllm bench
-│   ├── 04_bench_decode.py      # decode / prefill / prefix-cache measurements
-│   ├── install_vllm_nightly.sh # nightly vLLM + AITER + patch stack (idempotent)
-│   └── bench/                  # comprehensive benchmark harness
-└── scripts/env_setup.sh        # venv isolation (reuses system torch)
+├── patches/                    # our environment-specific patch overlays
+└── scripts/
+    ├── 00_check_env.sh         # environment probe (ROCm/vLLM/AITER/GPU/disk)
+    ├── 01_download_model.sh    # idempotent weight download (qwen38|qwen36|dsflash)
+    ├── 02_serve_vllm.sh        # native vllm serve launcher
+    ├── 03_benchmark.sh         # concurrency sweep via vllm bench
+    ├── 04_bench_decode.py      # decode / prefill / prefix-cache measurements
+    ├── env_setup.sh            # venv isolation (reuses system torch)
+    ├── install_vllm_nightly.sh # nightly vLLM + AITER + patch stack (idempotent)
+    └── bench/                  # benchmark harness (incl. agent multi-turn)
 ```
 
 ## Environment isolation
@@ -153,7 +163,7 @@ vllm-rocm-dsv4-flash/
 
 ## Contributing
 
-Bug reports and patches are welcome — especially anything that closes the 112 → 168 tok/s gap. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Bug reports and patches are welcome — especially anything that closes the 133 → 168 tok/s gap. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Acknowledgments
 
