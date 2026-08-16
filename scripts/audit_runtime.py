@@ -78,6 +78,7 @@ def git_head(path: Path) -> str:
 
 def main() -> int:
     failures: list[str] = []
+    warnings: list[str] = []
     py = VENV / "bin" / "python"
     if not py.exists():
         print(f"FAIL: venv python missing: {py}")
@@ -180,16 +181,30 @@ def main() -> int:
 
     for path, label in [
         (Path("/opt/cj-moe"), "JIT kernel source /opt/cj-moe"),
-        (Path("/root/.aiter"), "AITER runtime cache /root/.aiter"),
         (Path("/mnt/workspace/.venvs/vllm.tar.gz"), "persistent venv snapshot"),
-        (Path("/mnt/workspace/.venvs/aiter_cache.tar.gz"), "persistent AITER cache snapshot"),
     ]:
         print(f"{'OK' if path.exists() else 'MISS'} {label}")
         if not path.exists():
             failures.append(f"missing {label}")
 
+    # Runtime-generated caches improve restart latency but are not correctness
+    # prerequisites. A fresh GPU instance can regenerate them on first warm-up.
+    for path, label in [
+        (Path("/root/.aiter"), "AITER runtime cache /root/.aiter"),
+        (Path("/mnt/workspace/.venvs/aiter_cache.tar.gz"), "persistent AITER cache snapshot"),
+        (Path("/root/.cache/torch_extensions"), "torch_extensions runtime cache"),
+        (Path("/mnt/workspace/.venvs/torch_ext_cache.tar.gz"), "persistent torch_extensions snapshot"),
+    ]:
+        print(f"{'OK' if path.exists() else 'WARN'} {label}")
+        if not path.exists():
+            warnings.append(f"missing warm-start artifact: {label}")
+
     print()
     print(f"overlay summary: {matched}/{len(PATCHES)} accepted")
+    if warnings:
+        print("AUDIT WARNINGS (warm-start only):")
+        for item in warnings:
+            print(f"  - {item}")
     if failures:
         print("AUDIT FAILED:")
         for item in failures:

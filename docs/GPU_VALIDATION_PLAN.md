@@ -54,12 +54,15 @@ git pull --ff-only
 python3 scripts/audit_runtime.py
 ```
 
-The audit must pass. It verifies the pinned vLLM/AITER/flydsl versions, upstream
-patch commit, installed overlay hashes, top-k binary, sparse-prefill module,
-JIT source/cache, and persistent venv/cache snapshots.
+The audit must have **zero correctness/provenance failures**. It verifies the
+pinned vLLM/AITER/flydsl versions, upstream patch commit, installed overlay
+hashes, top-k binary, sparse-prefill module, JIT source, and the persistent venv
+snapshot. Runtime-generated AITER/torch caches are warm-start accelerators: a
+fresh host may warn when they are absent, but that does not block the first
+controlled warm-up.
 
-If this fails, treat it as recovery/provenance work. Do not start tuning on an
-unknown mixed runtime.
+If the audit reports a correctness/provenance failure, treat it as recovery
+work. Do not start tuning on an unknown mixed runtime.
 
 ## Phase 1 — default-profile correctness + regression gate
 
@@ -80,6 +83,11 @@ python3 scripts/bench/bench_tool_roundtrip.py --rounds 8 --mode auto --prefix-to
 
 # parser state under concurrent streaming
 python3 scripts/bench/bench_tool_roundtrip.py --rounds 16 --mode auto --prefix-tokens 100000 --concurrency 4
+
+# The first real GPU run may create AITER/torch JIT caches. Persist them only
+# after the control profile is healthy so the next restart is warm and auditable.
+bash scripts/snapshot_runtime_caches.sh
+python3 scripts/audit_runtime.py
 ```
 
 Minimum promotion gates:

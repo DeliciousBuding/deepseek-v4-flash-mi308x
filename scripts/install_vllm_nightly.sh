@@ -198,8 +198,8 @@ echo "snapshotting venv to persistent storage ..."
 tar -cf /mnt/workspace/.venvs/vllm.tar.gz -C "$(dirname "$VENV")" "$(basename "$VENV")"
 echo "  ✓ /mnt/workspace/.venvs/vllm.tar.gz ($(du -sh /mnt/workspace/.venvs/vllm.tar.gz | cut -f1))"
 
-tar -cf /mnt/workspace/.venvs/aiter_cache.tar.gz -C /root/.aiter . 2>/dev/null || true
-echo "  ✓ /mnt/workspace/.venvs/aiter_cache.tar.gz"
+echo "snapshotting runtime-generated caches (if already warm) ..."
+bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/snapshot_runtime_caches.sh"
 
 echo ""
 echo "=============================================="
