@@ -378,18 +378,31 @@ This is an open production-quality issue, not hidden by the tuning headline.
 ### 15.1 always cap solo long prefill at 1,024
 
 A local experimental scheduler switch kept the 1,024-token long-prefill cap
-active even when the long request was the only request in the engine. With the
-then-current table coverage:
+active even when the long request was the only request in the engine. The
+original measurement reported `~+3.08s`, but that was later shown to be the
+**first-round JIT/capture tax**, not steady-state behavior (see the 2026-08-16
+re-test below).
 
 ```text
 200K long total:        ~62.3s
 short alone:            ~0.08s
 short during prefill:   ~3.16s
-added short latency:    ~+3.08s
+added short latency:    ~+3.08s   (first round, JIT-contaminated)
 ```
 
-This was worse than production and was removed. The production scheduler source
-is unchanged.
+**2026-08-16 re-test, warm/JIT-stable (4 rounds, round 1 discarded):**
+
+```text
+round 02/03/04 added:   +0.98 / +0.99 / +0.90s   (median +0.98s)
+200K long total:        ~59.5s
+```
+
+So the *steady-state* always-1,024 cap is not a regression: it improves the
+late-short isolation from ~+1.30s to ~+0.98s at the cost of ~+13.5s on the 200K
+prefill (59.5s vs 46.1s). The original `+3.08s` verdict was a cold-start
+artifact. The cap was still removed because the isolation gain (+0.32s) does not
+justify a ~29% prefill-throughput loss, and it still misses the +0.5s gate. The
+production scheduler source is unchanged.
 
 ### 15.2 extra M~1024/1031/1032 tuning
 
