@@ -1,32 +1,31 @@
 #!/usr/bin/env bash
 # =============================================================================
-# install_vllm_nightly.sh — install nightly vLLM + AITER 0.1.19 + the patch stack
+# install_vllm_nightly.sh — install nightly vLLM + AITER 0.1.19 + patch stack
 #
-# Ports the historical ryanzhou/deepseek-v4-flash-mi300x stack validated by
-# this project onto a Docker-less host (venv + local wheels + byte-for-byte
-# patch overlay). The external patch checkout is revision-pinned: current
-# upstream main is a different production stack and must not silently replace
-# the baseline used here.
+# Ports the ryanzhou/deepseek-v4-flash-mi300x overlay source pinned at
+# 012b9945c1e61ec7a7c7de12da58e8c7cafd92ab onto this project's Docker-less
+# dev306 runtime. As of 2026-08-16 that source SHA is also upstream main, but
+# upstream production applies it to vLLM dev229. Same overlay source therefore
+# does NOT imply a byte-identical runtime.
 #
 # Prerequisites (paths overridable via env):
-#   1. wheels downloaded to $WHEELS (vLLM nightly, AITER, flydsl)
+#   1. wheels downloaded to $WHEELS (vLLM dev306, AITER, flydsl)
 #   2. patch repo prepared by scripts/prepare_patch_repo.sh
-#   3. vllm venv created (scripts/env_setup.sh)
+#   3. vllm venv created by scripts/env_setup.sh
 #
 # Usage: bash install_vllm_nightly.sh
-# Idempotent: safe to re-run (patches are overwritten; wheels installed with
-# --ignore-installed and never touch system packages).
+# Idempotent: patches are overwritten; wheels are installed into the venv and
+# system Python / system torch are never replaced.
 #
 # Version pins:
-#   vLLM  0.26.0+rocm723 (preinstalled) -> 0.26.1rc1.dev306+gcb8104839.rocm723 (nightly)
-#   AITER 0.1.16 (preinstalled)         -> 0.1.19
-#   flydsl                              -> 0.2.4
-#   patch source                        -> ryanzhou commit 012b9945c1e61ec7a7c7de12da58e8c7cafd92ab
-#   torch 2.11.0+gitd0c8b1f             -> reused from system
+#   vLLM  0.26.1rc1.dev306+gcb8104839.rocm723
+#   AITER 0.1.19
+#   flydsl 0.2.4
+#   patch source 012b9945c1e61ec7a7c7de12da58e8c7cafd92ab
+#   torch 2.11.0+gitd0c8b1f -> reused from system
 #
-# NOTE: create the venv on local disk (network storage writes small files
-#   ~660x slower). VENV defaults to /root/.venvs/vllm; snapshot it to a tarball
-#   on persistent storage for restart recovery (see private infra runbook).
+# NOTE: keep the venv on local disk. Snapshot it to persistent storage after a
+# validated install so a GPU restart does not require rebuilding the stack.
 # =============================================================================
 set -euo pipefail
 
@@ -37,13 +36,11 @@ PATCH_REPO_REV="${PATCH_REPO_REV:-012b9945c1e61ec7a7c7de12da58e8c7cafd92ab}"
 
 PY="$VENV/bin/python"
 PIP="$VENV/bin/pip"
-# venv 的 site-packages(补丁目标根目录)。用 pythonX.Y 显式拼, 避免 sysconfig
-# 在 --system-site-packages 下返回系统路径。
 PYVER="$("$PY" -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')"
 SITE="$VENV/lib/$PYVER/site-packages"
 
 echo "=============================================="
-echo "  vLLM nightly 安装 + pinned patch stack"
+echo "  vLLM dev306 + AITER 0.1.19 + pinned overlays"
 echo "=============================================="
 echo "venv:   $VENV"
 echo "site:   $SITE"
@@ -52,10 +49,10 @@ echo "patch:  $REPO"
 echo "patch revision: $PATCH_REPO_REV"
 
 echo ""
-echo "===== [0/10] 验证 patch source revision ====="
+echo "===== [0/10] verify patch source revision ====="
 if [ ! -d "$REPO/.git" ]; then
-  echo "❌ patch repo 不存在或不是 git checkout: $REPO"
-  echo "   先运行: bash scripts/prepare_patch_repo.sh"
+  echo "❌ patch repo missing or not a git checkout: $REPO"
+  echo "   run first: bash scripts/prepare_patch_repo.sh"
   exit 1
 fi
 ACTUAL_PATCH_REV="$(git -C "$REPO" rev-parse HEAD)"
@@ -63,65 +60,62 @@ if [ "$ACTUAL_PATCH_REV" != "$PATCH_REPO_REV" ]; then
   echo "❌ patch repo revision drift"
   echo "   expected: $PATCH_REPO_REV"
   echo "   actual:   $ACTUAL_PATCH_REV"
-  echo "   当前 upstream main 与本项目稳定 overlay 栈不同，禁止静默混用。"
-  echo "   修复: bash scripts/prepare_patch_repo.sh"
+  echo "   Refusing to mix an unpinned overlay source into the validated dev306 runtime."
+  echo "   fix: bash scripts/prepare_patch_repo.sh"
   exit 1
 fi
 if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then
-  echo "❌ patch repo 有 tracked local changes，拒绝用于可复现安装"
+  echo "❌ patch repo has tracked local changes; refusing reproducible install"
   git -C "$REPO" status --short
   exit 1
 fi
 echo "  ✓ patch source pinned: $ACTUAL_PATCH_REV"
 
 echo ""
-echo "===== [1/10] 确认系统 torch 复用(须 ROCm build) ====="
-"$PY" -c 'import torch; print("torch", torch.__version__, "hip", torch.version.hip); assert torch.version.hip, "非 ROCm torch"'
+echo "===== [1/10] verify system ROCm torch reuse ====="
+"$PY" -c 'import torch; print("torch", torch.__version__, "hip", torch.version.hip); assert torch.version.hip, "non-ROCm torch"'
 
 echo ""
-echo "===== [2/10] 定位 wheel ====="
+echo "===== [2/10] locate exact wheels ====="
 AITER_WHL="$(ls "$WHEELS"/amd_aiter-0.1.19-*.whl 2>/dev/null | head -1 || true)"
 VLLM_WHL="$(ls "$WHEELS"/vllm-0.26.1rc1.dev306+*.whl 2>/dev/null | head -1 || true)"
 FLYDSL_WHL="$(ls "$WHEELS"/flydsl-0.2.4-*.whl 2>/dev/null | head -1 || true)"
-[ -n "$AITER_WHL" ] || { echo "❌ 缺 AITER wheel, 请先下载到 $WHEELS"; exit 1; }
-[ -n "$VLLM_WHL" ]  || { echo "❌ 缺 vLLM wheel, 请先下载到 $WHEELS"; exit 1; }
-[ -n "$FLYDSL_WHL" ] || { echo "❌ 缺 flydsl 0.2.4 wheel(AITER 0.1.19 运行时要求 flydsl>=0.2.4), 请先下载到 $WHEELS"; exit 1; }
-echo "AITER: $AITER_WHL"
-echo "vLLM:  $VLLM_WHL"
+[ -n "$AITER_WHL" ] || { echo "❌ missing AITER wheel in $WHEELS"; exit 1; }
+[ -n "$VLLM_WHL" ]  || { echo "❌ missing vLLM dev306 wheel in $WHEELS"; exit 1; }
+[ -n "$FLYDSL_WHL" ] || { echo "❌ missing flydsl 0.2.4 wheel in $WHEELS"; exit 1; }
+echo "AITER:  $AITER_WHL"
+echo "vLLM:   $VLLM_WHL"
 echo "flydsl: $FLYDSL_WHL"
 
-# 完整性 sanity check(能当 zip 打开)
-"$PY" -c "import zipfile,sys; [zipfile.ZipFile(f).testzip() and sys.exit(1) for f in sys.argv[1:]]" "$AITER_WHL" "$VLLM_WHL" "$FLYDSL_WHL"
-echo "wheel 完整性 OK(zip 可读)"
+"$PY" -c "import zipfile,sys; [zipfile.ZipFile(f).testzip() and sys.exit(1) for f in sys.argv[1:]]" \
+  "$AITER_WHL" "$VLLM_WHL" "$FLYDSL_WHL"
+echo "wheel ZIP integrity OK"
 
 echo ""
-echo "===== [3/10] 安装 wheel(--ignore-installed 不碰系统包, --no-deps 复用 torch) ====="
-# --no-compile 跳过 .pyc 字节码生成: venv 在 NFS 上时大量小文件写很慢。
+echo "===== [3/10] install wheels into isolated venv ====="
 export PYTHONDONTWRITEBYTECODE=1
 "$PIP" install --no-deps --ignore-installed --no-compile "$AITER_WHL" "$VLLM_WHL"
-# AITER 0.1.19 的长前缀路径会运行时校验 flydsl>=0.2.4；系统 0.2.0
-# 会让 EngineCore 在首次触发该 lazy path 时死亡，因此 venv 必须显式覆盖。
+# AITER 0.1.19 validates flydsl>=0.2.4 only when the long-prefix FlyDSL path is
+# imported. Leaving the platform's 0.2.0 visible makes short prompts work and
+# then kills EngineCore on a long prefill, so the venv must explicitly override it.
 "$PIP" install --no-deps --no-compile "$FLYDSL_WHL"
 
 echo ""
-echo "===== [4/10] .so artifact 就位 + 校验 sha256 ====="
+echo "===== [4/10] top-k binary artifact + sha256 ====="
 SO_ARTIFACT="$REPO/patches/_C_stable_libtorch.topk-tiebreak-sanitize.abi3.so"
 EXPECT_SHA="a2912b897911c75d77611dcd42e4b0e0126bb8535f069045b32efc5f8f105610"
-# 若已解压且 sha256 匹配, 直接跳过(容忍 AMD 实例无 zstd); 否则现场解压
 if [ -f "$SO_ARTIFACT" ] && echo "$EXPECT_SHA  $SO_ARTIFACT" | sha256sum -c - >/dev/null 2>&1; then
-  echo "  ✓ .so 已就位且 sha256 匹配, 跳过解压"
+  echo "  ✓ patched .so already present and verified"
 elif command -v zstd >/dev/null 2>&1; then
   zstd -d -f "$REPO/artifacts/_C_stable_libtorch.topk-tiebreak-sanitize.abi3.so.zst" -o "$SO_ARTIFACT"
   echo "$EXPECT_SHA  $SO_ARTIFACT" | sha256sum -c -
 else
-  echo "❌ .so 缺失且无 zstd 工具, 请先在 CPU 实例预解压"
+  echo "❌ patched .so missing and zstd unavailable"
   exit 1
 fi
 
 echo ""
-echo "===== [5/10] 套用 Python 补丁(byte-for-byte 覆盖) ====="
-# 映射表: "源文件名|目标相对 site-packages 路径"
-# 源查找顺序: 本仓库 patches/ 优先(自有环境补丁), 其次 pinned upstream repo。
+echo "===== [5/10] apply Python overlays ====="
 PATCHES=(
   "gpt_oss_triton_kernels_moe.row-i8asym-candidate.py|vllm/model_executor/layers/fused_moe/experts/gpt_oss_triton_kernels_moe.py"
   "mxfp4.fused-silu.py|vllm/model_executor/layers/fused_moe/oracle/mxfp4.py"
@@ -157,53 +151,53 @@ for entry in "${PATCHES[@]}"; do
   echo "  ✓ $dst  ($patch_src)"
 done
 
-# 二进制补丁: topk-tiebreak 修复(崩溃根因)
-cp -f "$REPO/patches/_C_stable_libtorch.topk-tiebreak-sanitize.abi3.so" "$SITE/vllm/_C_stable_libtorch.abi3.so"
-echo "  ✓ vllm/_C_stable_libtorch.abi3.so (topk 空集崩溃修复)"
+cp -f "$SO_ARTIFACT" "$SITE/vllm/_C_stable_libtorch.abi3.so"
+echo "  ✓ vllm/_C_stable_libtorch.abi3.so"
 
 echo ""
-echo "===== [6/10] 预编译 hip-a8w4 内核 .so → aiter/jit/ ====="
+echo "===== [6/10] sparse-prefill module -> aiter/jit ====="
 mkdir -p "$SITE/aiter/jit"
 cp -f "$REPO/kernel-dev/hip-a8w4/opus942/module_pa_sparse_prefill_opus942.so" "$SITE/aiter/jit/"
-echo "  ✓ aiter/jit/module_pa_sparse_prefill_opus942.so"
+echo "  ✓ module_pa_sparse_prefill_opus942.so"
 
 echo ""
-echo "===== [7/10] tuning CSV → AITER config ====="
+echo "===== [7/10] AITER tuning table ====="
 mkdir -p "$SITE/aiter/configs/model_configs"
 cp -f "$REPO/tuning/dsv4-a8w8-blockscale-tuned-gemm.mi300x.decode-candidate.csv" \
   "$SITE/aiter/configs/model_configs/dsv4_a8w8_blockscale_tuned_gemm.csv"
-echo "  ✓ aiter/configs/model_configs/dsv4_a8w8_blockscale_tuned_gemm.csv"
+echo "  ✓ dsv4_a8w8_blockscale_tuned_gemm.csv"
 
 echo ""
-echo "===== [8/10] 内核源码 → /opt/cj-moe(JIT 编译用) ====="
+echo "===== [8/10] JIT kernel source -> /opt/cj-moe ====="
 mkdir -p /opt/cj-moe
 cp -rf "$REPO/kernel-dev/hip-a8w4/." /opt/cj-moe/
-echo "  ✓ /opt/cj-moe (swiglu_clamp/schedule/quanti8asym/fusedi8asym64/w2 + opus942)"
+echo "  ✓ /opt/cj-moe"
 
 echo ""
-echo "===== [9/10] mxfp4 activation 兼容修复 ====="
-# Historical mxfp4 overlay came from an older runtime and omitted activation;
-# dev306's caller still passes activation=. Add the ignored optional parameter.
+echo "===== [9/10] dev306 mxfp4 signature compatibility ====="
+# The upstream overlay omits an activation argument that dev306's caller still
+# passes. Add an ignored optional parameter; this is a runtime-port compatibility
+# edit, not a model-math change.
 MFXP4="$SITE/vllm/model_executor/layers/fused_moe/oracle/mxfp4.py"
 if grep -q "def mxfp4_round_up_hidden_size_and_intermediate_size" "$MFXP4" && \
    ! grep -q "activation=None" "$MFXP4"; then
   sed -i 's|    backend: Mxfp4MoeBackend, hidden_size: int, intermediate_size: int|    backend: Mxfp4MoeBackend, hidden_size: int, intermediate_size: int,\n    activation=None,|' "$MFXP4"
-  echo "  ✓ 已加回 activation 可选参数"
+  echo "  ✓ activation=None compatibility parameter added"
 else
-  echo "  ✓ 已兼容(跳过)"
+  echo "  ✓ compatibility already present"
 fi
 
 echo ""
-echo "===== [10/10] 验证 + 打 tarball 备份到持久盘 ====="
+echo "===== [10/10] validate + persist restart snapshots ====="
 "$PY" -c 'import vllm; print("vllm", vllm.__version__)'
-"$PY" -c 'import aiter; print("aiter import OK")'
+"$PY" -c 'import importlib.metadata as m; import aiter; print("AITER", m.version("amd-aiter"))'
 "$PY" -c 'import flydsl; from aiter.ops.flydsl import is_flydsl_available; assert flydsl.__version__.startswith("0.2.4"), flydsl.__version__; assert is_flydsl_available(); print("flydsl", flydsl.__version__, "OK")'
 
-echo "打 tarball 备份到持久盘(重启后 private infra bootstrap 恢复) ..."
 mkdir -p /mnt/workspace/.venvs
+echo "snapshotting venv to persistent storage ..."
 tar -cf /mnt/workspace/.venvs/vllm.tar.gz -C "$(dirname "$VENV")" "$(basename "$VENV")"
 echo "  ✓ /mnt/workspace/.venvs/vllm.tar.gz ($(du -sh /mnt/workspace/.venvs/vllm.tar.gz | cut -f1))"
-# AITER 运行时缓存也持久化(小), bootstrap 会恢复
+
 tar -cf /mnt/workspace/.venvs/aiter_cache.tar.gz -C /root/.aiter . 2>/dev/null || true
 echo "  ✓ /mnt/workspace/.venvs/aiter_cache.tar.gz"
 
