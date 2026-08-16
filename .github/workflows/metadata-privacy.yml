@@ -1,0 +1,67 @@
+name: metadata-privacy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  sanitize:
+    # The force-push performed below triggers another push event. Skip that
+    # bot-authored event so this workflow cannot loop.
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check whether history needs metadata sanitization
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          noreply='101502465+DeliciousBuding@users.noreply.github.com'
+          bad=0
+          while IFS= read -r email; do
+            [ -z "$email" ] && continue
+            if [ "$email" != "$noreply" ]; then
+              bad=1
+              break
+            fi
+          done < <(git log main --format='%ae%n%ce')
+          echo "needed=$bad" >> "$GITHUB_OUTPUT"
+
+      - name: Rewrite public commit metadata to GitHub noreply
+        if: steps.check.outputs.needed == '1'
+        shell: bash
+        env:
+          FILTER_BRANCH_SQUELCH_WARNING: '1'
+        run: |
+          set -euo pipefail
+          noreply='101502465+DeliciousBuding@users.noreply.github.com'
+
+          # Preserve names, dates, trees and messages; only normalize author /
+          # committer email metadata. This repository is deliberately a
+          # single-maintainer public recipe, so one noreply identity is the
+          # desired public-history policy.
+          git filter-branch -f \
+            --env-filter '
+              GIT_AUTHOR_EMAIL="101502465+DeliciousBuding@users.noreply.github.com"
+              GIT_COMMITTER_EMAIL="101502465+DeliciousBuding@users.noreply.github.com"
+              export GIT_AUTHOR_EMAIL GIT_COMMITTER_EMAIL
+            ' \
+            --msg-filter 'sed "/^Co-authored-by: Cursor /d"' \
+            -- main
+
+          git push --force origin HEAD:main
+
+      - name: Verify sanitized history
+        if: steps.check.outputs.needed == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          noreply='101502465+DeliciousBuding@users.noreply.github.com'
+          test -z "$(git log main --format='%ae%n%ce' | grep -v -F "$noreply" | sed '/^$/d')"
