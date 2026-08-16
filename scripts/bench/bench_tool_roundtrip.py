@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
-"""Validate streaming DeepSeek-V4 tool calls and the full tool round trip.
+"""Validate DeepSeek-V4 streaming tool calls and full round trips.
 
-The benchmark exercises the exact protocol shape used by coding agents:
+Exercises:
+  assistant(streamed tool_calls) -> role=tool result -> assistant final answer
 
-  assistant(streamed tool_calls) -> tool result -> assistant final answer
+Supports forced/required/auto tool selection, long stable prefixes, and
+concurrent independent rounds. This directly targets parser failures that only
+appear under long context or concurrent streaming load.
 
-It checks fragmented streaming tool-call deltas, JSON arguments, TTFT to the
-first semantic delta, and per-request prefix-cache accounting. The default run
-uses ten independent rounds sharing a stable system/repository prefix.
-
-Usage:
-  python3 scripts/bench/bench_tool_roundtrip.py [--rounds 10] [--prefix-tokens 20000]
-
-Environment:
-  VLLM_BASE_URL, VLLM_API_KEY / VLLM_API_KEY_FILE, VLLM_MODEL
+Examples:
+  python3 scripts/bench/bench_tool_roundtrip.py --rounds 10
+  python3 scripts/bench/bench_tool_roundtrip.py --mode auto --prefix-tokens 100000
+  python3 scripts/bench/bench_tool_roundtrip.py --mode auto --prefix-tokens 100000 --concurrency 4 --rounds 16
 """
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+from dataclasses import dataclass
 import json
 import os
+import statistics
 import time
 import urllib.request
-from dataclasses import dataclass
 
 BASE = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000")
 MODEL = os.environ.get("VLLM_MODEL", "deepseek-v4-flash")
@@ -30,27 +30,26 @@ KEY = os.environ.get("VLLM_API_KEY") or open(
     os.environ.get("VLLM_API_KEY_FILE", "/mnt/workspace/.bootstrap/vllm_api_key")
 ).read().strip()
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read a UTF-8 source file from the current repository.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string"}},
-                "required": ["path"],
-                "additionalProperties": False,
-            },
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": "Read a UTF-8 source file from the current repository.",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": False,
         },
-    }
-]
+    },
+}]
 FORCED_TOOL = {"type": "function", "function": {"name": "read_file"}}
 REPO_UNIT = (
     "Repository convention: Go services use context.Context, typed errors, "
     "table-driven tests, and explicit cancellation. handlers/auth.go validates "
     "OIDC tokens and refreshes JWKS through a single-flight cache. "
 )
+DSML_HINTS = ("DSML", "invoke name=", "tool_calls>", "parameter name=")
 
 
 def stable_system(prefix_tokens: int) -> str:
@@ -88,10 +87,7 @@ def stream_chat(body: dict) -> StreamResult:
     req = urllib.request.Request(
         BASE + "/v1/chat/completions",
         data=json.dumps(body).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + KEY,
-        },
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + KEY},
     )
 
     t0 = time.perf_counter()
@@ -125,7 +121,6 @@ def stream_chat(body: dict) -> StreamResult:
                 content_parts.append(delta["content"])
             if delta.get("reasoning_content"):
                 reasoning_parts.append(delta["reasoning_content"])
-
             for tc in delta.get("tool_calls") or []:
                 idx = int(tc.get("index", 0))
                 acc = calls.setdefault(
@@ -158,109 +153,135 @@ def stream_chat(body: dict) -> StreamResult:
 def cache_text(r: StreamResult) -> str:
     if r.cached_tokens is None or not r.prompt_tokens:
         return "cache=n/a"
-    return f"cache={100.0 * r.cached_tokens / r.prompt_tokens:.1f}%"
+    return f"cache={100.0*r.cached_tokens/r.prompt_tokens:.1f}%"
 
 
-def validate_tool_call(r: StreamResult) -> tuple[bool, str, dict | None]:
+def tool_choice(mode: str):
+    if mode == "forced":
+        return FORCED_TOOL
+    return mode
+
+
+def validate_tool_call(r: StreamResult) -> tuple[bool, str]:
     if len(r.tool_calls) != 1:
-        return False, f"expected 1 tool call, got {len(r.tool_calls)}", None
+        leaked = any(x in r.content for x in DSML_HINTS)
+        suffix = " (raw DSML-like content leaked)" if leaked else ""
+        return False, f"expected 1 tool call, got {len(r.tool_calls)}{suffix}"
     tc = r.tool_calls[0]
     if tc["function"]["name"] != "read_file":
-        return False, f"wrong function {tc['function']['name']!r}", None
+        return False, f"wrong function {tc['function']['name']!r}"
     try:
         args = json.loads(tc["function"]["arguments"])
     except json.JSONDecodeError as exc:
-        return False, f"invalid tool JSON: {exc}", None
+        return False, f"invalid tool JSON: {exc}"
     if args.get("path") != "handlers/auth.go":
-        return False, f"wrong path {args.get('path')!r}", args
+        return False, f"wrong path {args.get('path')!r}"
     if not tc.get("id"):
-        return False, "missing tool_call id", args
-    return True, "ok", args
+        return False, "missing tool_call id"
+    return True, "ok"
+
+
+def run_round(i: int, system: str, mode: str, salt: str | None) -> dict:
+    common = {"cache_salt": salt} if salt else {}
+    request1 = {
+        **common,
+        "messages": [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    f"Round {i}: you must inspect handlers/auth.go before answering. "
+                    "Call read_file with the exact path handlers/auth.go now. Do not "
+                    "describe the call in prose; actually call the tool."
+                ),
+            },
+        ],
+        "tools": TOOLS,
+        "tool_choice": tool_choice(mode),
+        "max_tokens": 256,
+    }
+
+    try:
+        r1 = stream_chat(request1)
+    except Exception as exc:
+        return {"i": i, "ok": False, "why": f"request1 error: {exc}"}
+    ok, why = validate_tool_call(r1)
+    if not ok:
+        return {"i": i, "ok": False, "why": why, "r1": r1}
+
+    tc = r1.tool_calls[0]
+    tool_result = (
+        "package handlers\n\n"
+        "func VerifyToken(ctx context.Context, raw string) error {\n"
+        "    keys, err := jwks.Get(ctx)\n"
+        "    if err != nil { return fmt.Errorf(\"jwks: %w\", err) }\n"
+        "    return verify(raw, keys)\n"
+        "}\n"
+    )
+    request2 = {
+        **common,
+        "messages": request1["messages"] + [
+            {"role": "assistant", "content": r1.content or None, "tool_calls": [tc]},
+            {"role": "tool", "tool_call_id": tc["id"], "content": tool_result},
+        ],
+        "tools": TOOLS,
+        "tool_choice": "none",
+        "max_tokens": 256,
+    }
+    try:
+        r2 = stream_chat(request2)
+    except Exception as exc:
+        return {"i": i, "ok": False, "why": f"request2 error: {exc}", "r1": r1}
+    final_text = (r2.content or r2.reasoning).strip()
+    if not final_text:
+        return {"i": i, "ok": False, "why": "empty post-tool answer", "r1": r1, "r2": r2}
+    return {"i": i, "ok": True, "why": "ok", "r1": r1, "r2": r2}
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=10)
     ap.add_argument("--prefix-tokens", type=int, default=20000)
-    ap.add_argument("--salt", default=None, help="optional cache_salt for the whole fixture")
+    ap.add_argument("--mode", choices=("forced", "required", "auto"), default="forced")
+    ap.add_argument("--concurrency", type=int, default=1)
+    ap.add_argument("--salt", default=None)
     args = ap.parse_args()
+    if args.rounds < 1 or args.concurrency < 1:
+        ap.error("rounds and concurrency must be positive")
 
     system = stable_system(args.prefix_tokens)
+    if args.concurrency == 1:
+        results = [run_round(i, system, args.mode, args.salt) for i in range(1, args.rounds + 1)]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+            futures = [pool.submit(run_round, i, system, args.mode, args.salt) for i in range(1, args.rounds + 1)]
+            results = [f.result() for f in futures]
+        results.sort(key=lambda x: x["i"])
+
     passed = 0
-    tool_ttfts: list[float] = []
-    answer_ttfts: list[float] = []
-
-    for i in range(1, args.rounds + 1):
-        common = {"cache_salt": args.salt} if args.salt else {}
-        request1 = {
-            **common,
-            "messages": [
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Round {i}: inspect handlers/auth.go. Call read_file with "
-                        "that exact path before answering."
-                    ),
-                },
-            ],
-            "tools": TOOLS,
-            "tool_choice": FORCED_TOOL,
-            "max_tokens": 256,
-        }
-        r1 = stream_chat(request1)
-        ok, why, _ = validate_tool_call(r1)
-        if not ok:
-            print(f"round {i:02d}: FAIL tool-call: {why}")
+    tool_ttfts, answer_ttfts = [], []
+    for x in results:
+        i = x["i"]
+        if not x["ok"]:
+            print(f"round {i:02d}: FAIL | {x['why']}")
             continue
-
-        tc = r1.tool_calls[0]
-        tool_result = (
-            "package handlers\n\n"
-            "func VerifyToken(ctx context.Context, raw string) error {\n"
-            "    keys, err := jwks.Get(ctx)\n"
-            "    if err != nil { return fmt.Errorf(\"jwks: %w\", err) }\n"
-            "    return verify(raw, keys)\n"
-            "}\n"
-        )
-        request2 = {
-            **common,
-            "messages": request1["messages"]
-            + [
-                {
-                    "role": "assistant",
-                    "content": r1.content or None,
-                    "tool_calls": [tc],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": tool_result,
-                },
-            ],
-            "tools": TOOLS,
-            "tool_choice": "none",
-            "max_tokens": 256,
-        }
-        r2 = stream_chat(request2)
-        final_text = (r2.content or r2.reasoning).strip()
-        ok2 = bool(final_text)
-        if ok2:
-            passed += 1
+        passed += 1
+        r1, r2 = x["r1"], x["r2"]
         tool_ttfts.append(r1.ttft_s)
         answer_ttfts.append(r2.ttft_s)
         print(
-            f"round {i:02d}: {'PASS' if ok2 else 'FAIL'} | "
-            f"tool TTFT={r1.ttft_s:.3f}s {cache_text(r1)} | "
-            f"answer TTFT={r2.ttft_s:.3f}s {cache_text(r2)} | "
-            f"tool={tc['function']['name']}"
+            f"round {i:02d}: PASS | tool TTFT={r1.ttft_s:.3f}s {cache_text(r1)} | "
+            f"post-tool TTFT={r2.ttft_s:.3f}s {cache_text(r2)}"
         )
 
     print()
-    print(f"tool round-trip survival: {passed}/{args.rounds}")
+    print(
+        f"tool round-trip survival: {passed}/{args.rounds} | mode={args.mode} "
+        f"prefix~{args.prefix_tokens} concurrency={args.concurrency}"
+    )
     if tool_ttfts:
-        print(f"avg tool-call TTFT: {sum(tool_ttfts) / len(tool_ttfts):.3f}s")
-        print(f"avg post-tool TTFT: {sum(answer_ttfts) / len(answer_ttfts):.3f}s")
+        print(f"tool-call TTFT median={statistics.median(tool_ttfts):.3f}s max={max(tool_ttfts):.3f}s")
+        print(f"post-tool TTFT median={statistics.median(answer_ttfts):.3f}s max={max(answer_ttfts):.3f}s")
     return 0 if passed == args.rounds else 1
 
 
