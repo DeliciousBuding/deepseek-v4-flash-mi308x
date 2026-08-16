@@ -1,28 +1,13 @@
 #!/usr/bin/env python3
-"""bench_agent_trace.py — coding-agent multi-turn session benchmark.
+"""Coding-agent multi-turn benchmark.
 
-Simulates a realistic coding-agent workload against the OpenAI-compatible
-endpoint:
+Stable prefix + growing user/assistant history + periodic environment
+observations. Full role=tool protocol correctness is tested separately by
+bench_tool_roundtrip.py.
 
-  - stable prefix: system prompt + tool schema + repo context
-  - growing tail: previous user/assistant turns
-  - periodic environment/tool observations folded into the next user turn
-  - streaming TTFT + per-request prompt cache accounting
-
-This benchmark intentionally does NOT emit synthetic ``role=tool`` messages.
-A role=tool message is only protocol-valid when it corresponds to an earlier
-assistant tool_call id. Full tool protocol correctness is exercised separately
-by ``bench_tool_roundtrip.py``.
-
-The authoritative cache metric is
-``usage.prompt_tokens_details.cached_tokens`` from each request. Engine-wide
-/metrics counters are retained only as a diagnostic because concurrent traffic
-can make a global counter delta include other clients.
-
-Env overrides: VLLM_API_KEY / VLLM_API_KEY_FILE, VLLM_BASE_URL, VLLM_MODEL.
-Usage:
-  python3 bench_agent_trace.py [turns] [prefix_tokens] [--salt SALT]
-Defaults: 30 turns, ~20K stable prefix, output 256 tokens/turn.
+Authoritative cache metric:
+  usage.prompt_tokens_details.cached_tokens
+Engine-global cache counters are diagnostic only.
 """
 import argparse
 import json
@@ -38,8 +23,8 @@ BASE = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000")
 MODEL = os.environ.get("VLLM_MODEL", "deepseek-v4-flash")
 
 SYSTEM_PROMPT = (
-    "You are an expert coding agent. Follow the repo conventions, prefer "
-    "explicit error handling, and always explain non-obvious choices. "
+    "You are an expert coding agent. Follow repository conventions, prefer "
+    "explicit error handling, and explain non-obvious choices. "
 )
 TOOL_SCHEMA = json.dumps({
     "type": "function",
@@ -62,12 +47,10 @@ REPO_UNIT = (
 
 
 def make_repo_context(target_tokens: int) -> str:
-    """Approximately target_tokens of stable repo-context text."""
     return REPO_UNIT * max(1, target_tokens // 40)
 
 
 def engine_cache_metrics() -> tuple[float, float] | None:
-    """Engine-global (hits, queries) token counters from /metrics."""
     try:
         txt = urllib.request.urlopen(BASE + "/metrics", timeout=10).read().decode()
     except Exception:
@@ -81,12 +64,7 @@ def engine_cache_metrics() -> tuple[float, float] | None:
 
 
 def _semantic_delta(delta: dict) -> bool:
-    """True when a streaming chunk contains model output, not role metadata."""
-    return bool(
-        delta.get("content")
-        or delta.get("reasoning_content")
-        or delta.get("tool_calls")
-    )
+    return bool(delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls"))
 
 
 def chat_stream(messages, max_tokens=256, temperature=0.0, salt=None):
@@ -100,38 +78,30 @@ def chat_stream(messages, max_tokens=256, temperature=0.0, salt=None):
     }
     if salt:
         body["cache_salt"] = salt
-
     req = urllib.request.Request(
         BASE + "/v1/chat/completions",
         data=json.dumps(body).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + KEY,
-        },
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + KEY},
     )
 
     t0 = time.perf_counter()
     first = None
-    usage_final = {}
-    content_parts = []
-    reasoning_parts = []
-
+    usage = {}
+    content_parts, reasoning_parts = [], []
     with urllib.request.urlopen(req, timeout=1800) as resp:
         for raw in resp:
             line = raw.decode("utf-8", "ignore").strip()
             if not line.startswith("data:"):
                 continue
-            data = line[5:].strip()
-            if data == "[DONE]":
+            payload = line[5:].strip()
+            if payload == "[DONE]":
                 break
             try:
-                obj = json.loads(data)
+                obj = json.loads(payload)
             except Exception:
                 continue
-
             if obj.get("usage"):
-                usage_final = obj["usage"]
-
+                usage = obj["usage"]
             choices = obj.get("choices") or []
             if not choices:
                 continue
@@ -147,48 +117,58 @@ def chat_stream(messages, max_tokens=256, temperature=0.0, salt=None):
     total = end - t0
     ttft = (first - t0) if first is not None else total
     decode = max(0.0, total - ttft)
-
-    n_tokens = int(usage_final.get("completion_tokens") or 0)
-    prompt_tokens = int(usage_final.get("prompt_tokens") or 0)
-    details = usage_final.get("prompt_tokens_details") or {}
-    cached_raw = details.get("cached_tokens")
-    cached_tokens = int(cached_raw) if cached_raw is not None else None
-
+    details = usage.get("prompt_tokens_details") or {}
+    cached = details.get("cached_tokens")
+    n_tokens = int(usage.get("completion_tokens") or 0)
     return {
         "total": total,
         "ttft": ttft,
         "n_tokens": n_tokens,
-        "prompt_tokens": prompt_tokens,
-        "cached_tokens": cached_tokens,
+        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+        "cached_tokens": int(cached) if cached is not None else None,
         "decode_tok_s": n_tokens / decode if decode > 0 else 0.0,
         "content": "".join(content_parts),
         "reasoning": "".join(reasoning_parts),
     }
 
 
+def history_answer(result: dict, include_reasoning: bool, turn: int) -> str:
+    """Model what an upstream harness re-submits on the next turn.
+
+    Default is content-only: hidden/reasoning output is not echoed back into the
+    prompt. --include-reasoning-history explicitly tests clients that do replay it.
+    """
+    if include_reasoning:
+        text = "\n".join(x for x in (result["reasoning"], result["content"]) if x).strip()
+    else:
+        text = result["content"].strip()
+    return text or f"[assistant final content unavailable for turn {turn}]"
+
+
 def fmt_cache(r: dict) -> str:
-    cached = r["cached_tokens"]
-    prompt = r["prompt_tokens"]
-    if cached is None or prompt <= 0:
+    if r["cached_tokens"] is None or r["prompt_tokens"] <= 0:
         return "cache n/a"
-    return f"cache {cached}/{prompt} ({100.0 * cached / prompt:5.1f}%)"
+    return f"cache {r['cached_tokens']}/{r['prompt_tokens']} ({100.0*r['cached_tokens']/r['prompt_tokens']:.1f}%)"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="coding-agent multi-turn bench")
-    parser.add_argument("turns", nargs="?", type=int, default=30)
-    parser.add_argument("prefix_tokens", nargs="?", type=int, default=20000)
-    parser.add_argument("--salt", help="per-session cache_salt (multi-tenant isolation)")
-    parser.add_argument("--output-tokens", type=int, default=256)
-    args = parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("turns", nargs="?", type=int, default=30)
+    p.add_argument("prefix_tokens", nargs="?", type=int, default=20000)
+    p.add_argument("--salt")
+    p.add_argument("--output-tokens", type=int, default=256)
+    p.add_argument(
+        "--include-reasoning-history", action="store_true",
+        help="replay reasoning_content on following turns (default: content-only)",
+    )
+    args = p.parse_args()
 
-    repo_context = make_repo_context(args.prefix_tokens)
-    stable_system = SYSTEM_PROMPT + TOOL_SCHEMA + repo_context
+    stable_system = SYSTEM_PROMPT + TOOL_SCHEMA + make_repo_context(args.prefix_tokens)
     history = [{"role": "system", "content": stable_system}]
     results = []
     global0 = engine_cache_metrics()
-    t_session = time.perf_counter()
     pending_observation = ""
+    t_session = time.perf_counter()
 
     for turn in range(1, args.turns + 1):
         task = (
@@ -198,83 +178,58 @@ def main():
         user_turn = (pending_observation + "\n" + task).strip()
         pending_observation = ""
         messages = list(history) + [{"role": "user", "content": user_turn}]
-
-        r = chat_stream(
-            messages,
-            max_tokens=args.output_tokens,
-            salt=args.salt,
-        )
+        r = chat_stream(messages, args.output_tokens, 0.0, args.salt)
         results.append(r)
 
         history.append({"role": "user", "content": user_turn})
-        # Keep the actual model answer in the growing tail. If a parser exposes
-        # only reasoning text, retain that rather than a synthetic unrelated
-        # reply.
-        answer = r["content"] or r["reasoning"] or f"turn-{turn} completed"
-        history.append({"role": "assistant", "content": answer})
+        history.append({
+            "role": "assistant",
+            "content": history_answer(r, args.include_reasoning_history, turn),
+        })
 
-        # Emulate a large read/test result without forging an invalid role=tool
-        # record. It is presented as an environment observation at the start of
-        # the NEXT user turn. Full role=tool semantics are tested elsewhere.
         if turn % 4 == 0:
             pending_observation = (
                 "[environment observation from read_file handlers/auth.go] "
                 + ("auth middleware source, stack trace, and focused test output; " * 180)
             )
 
-        cache_state = "hot" if turn > 1 else "cold"
         print(
-            f"turn {turn:2d} [{cache_state}]: total {r['total']:6.2f}s | "
-            f"TTFT {r['ttft']:6.2f}s | {r['n_tokens']:4d} tok | "
-            f"decode {r['decode_tok_s']:6.1f} tok/s | {fmt_cache(r)}",
+            f"turn {turn:2d} [{'hot' if turn > 1 else 'cold'}]: "
+            f"total {r['total']:6.2f}s | TTFT {r['ttft']:6.2f}s | "
+            f"{r['n_tokens']:4d} tok | decode {r['decode_tok_s']:6.1f} tok/s | {fmt_cache(r)}",
             flush=True,
         )
 
-    session_s = time.perf_counter() - t_session
     global1 = engine_cache_metrics()
-    total_tokens = sum(r["n_tokens"] for r in results)
+    session_s = time.perf_counter() - t_session
     hot = results[1:] if len(results) > 1 else results
-    avg_ttft = sum(r["ttft"] for r in hot) / max(1, len(hot))
-    avg_decode = sum(r["decode_tok_s"] for r in results) / max(1, len(results))
-    speedup = results[0]["total"] / results[-1]["total"] if results[-1]["total"] else 0.0
-
-    measurable = [
-        r for r in results
-        if r["cached_tokens"] is not None and r["prompt_tokens"] > 0
-    ]
+    measurable = [r for r in results if r["cached_tokens"] is not None and r["prompt_tokens"] > 0]
     cached_sum = sum(r["cached_tokens"] for r in measurable)
     prompt_sum = sum(r["prompt_tokens"] for r in measurable)
+    avg_ttft = sum(r["ttft"] for r in hot) / max(1, len(hot))
+    avg_decode = sum(r["decode_tok_s"] for r in results) / max(1, len(results))
 
     print()
+    print("=== session summary ===")
     print(
-        f"=== session summary ({args.turns} turns, ~{args.prefix_tokens} "
-        f"stable-prefix tokens, salt={args.salt or 'none'}) ==="
+        f"turns={args.turns} stable_prefix~{args.prefix_tokens} "
+        f"reasoning_history={args.include_reasoning_history} salt={args.salt or 'none'}"
     )
-    print(f"session total: {session_s:.1f}s, {total_tokens} completion tokens")
+    print(f"session total: {session_s:.1f}s")
     print(f"avg hot TTFT: {avg_ttft:.3f}s")
     print(f"avg decode: {avg_decode:.1f} tok/s")
-    print(f"hot vs cold total latency: {speedup:.1f}x")
-
     if prompt_sum:
         print(
-            "per-request prefix-cache hit rate: "
-            f"{100.0 * cached_sum / prompt_sum:.2f}% "
-            f"({cached_sum}/{prompt_sum} prompt tokens cached; "
-            f"{len(measurable)}/{len(results)} requests reported details)"
+            f"per-request prefix-cache hit: {100.0*cached_sum/prompt_sum:.2f}% "
+            f"({cached_sum}/{prompt_sum}; {len(measurable)}/{len(results)} requests reported details)"
         )
     else:
-        print(
-            "per-request prefix-cache hit rate: n/a "
-            "(server did not return prompt_tokens_details.cached_tokens)"
-        )
-
+        print("per-request prefix-cache hit: n/a")
     if global0 and global1:
-        dh = global1[0] - global0[0]
-        dq = global1[1] - global0[1]
-        rate = 100.0 * dh / dq if dq else 0.0
+        dh, dq = global1[0] - global0[0], global1[1] - global0[1]
         print(
-            "engine-global cache counters (diagnostic only): "
-            f"{rate:.2f}% ({dh:.0f}/{dq:.0f}); may include other clients"
+            f"engine-global cache counters (diagnostic): "
+            f"{(100.0*dh/dq if dq else 0.0):.2f}% ({dh:.0f}/{dq:.0f})"
         )
 
 
