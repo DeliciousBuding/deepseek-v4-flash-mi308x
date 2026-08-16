@@ -1,6 +1,6 @@
 # GPU validation and tuning plan
 
-This is the ordered runbook for the next MI300X/MI308X GPU session. The
+This is the ordered runbook for future MI300X/MI308X GPU experiments. The
 validated defaults stay frozen until a controlled candidate improves the
 **end-to-end coding-agent workload** while preserving correctness, 500K-class
 context, cache retention, tool protocol, and restart reproducibility.
@@ -37,9 +37,10 @@ Last local control measurements:
 C1/C2/C4/C8 aggregate              129.2 / 235.8 / 375.0 / 549.6 tok/s
 50K -> 500K ladder                 all pass (500K: 77.3s at 3072; 75.3s at 4096)
 30-turn per-request cached tokens  95.46% (1,027,596 / 1,076,518)
-hot agent TTFT                     ~0.20-0.36s ordinary hot turns
+hot agent TTFT                     ~0.23-0.38s ordinary hot turns
 auto tool roundtrip                100K 5/5; 200K 3/3; 100K C4 16/16
 true-cold 200K isolation           KNOWN DEGRADED: +1.30 / +1.33 / +1.41s at 3072
+high-batch K7 C32/C64              730.2 / 914.6 tok/s; native reaches parity only at C64
 ```
 
 ## Phase 0 — runtime integrity before serving
@@ -156,21 +157,29 @@ preemptions, HBM high-water and CPU-KV pressure.
 Do not choose the winner by fresh prefill alone. Choose the agent-session Pareto
 point.
 
-## Phase 4 — DSpark vs native decode under concurrency
+## Phase 4 — DSpark vs native decode under concurrency (completed)
 
-Static K=7 is the proven local single-stream winner, but speculative verification
-can become throughput-negative as runtime batch size rises. A current vLLM issue
-shows DSpark losing badly to native decoding on a saturated high-batch workload
-even with reasonable acceptance.
+The 2026-08-16 clean-restart comparison found that K7 remains the clear winner
+through C32. Native reaches aggregate parity only at full C64 admission:
 
-Use the same prompts/profile:
+```text
+                         warm decode-512    C32 aggregate    C64 aggregate
+DSpark K7                        141.7           730.2            914.6 tok/s
+native                            33.4           570.4            921.6 tok/s
+```
+
+K7 retains the lower C64 median latency and remains the production default.
+Re-run this phase only after a material runtime or DSpark implementation change.
+Use the same prompts/profile with separate clean restarts and warm-ups:
 
 ```bash
 DSPARK_ENABLED=1 DSPARK_K=7 bash scripts/02_serve_vllm.sh dsflash
 DSPARK_ENABLED=0            bash scripts/02_serve_vllm.sh dsflash
+
+python3 scripts/bench/bench_high_concurrency.py --concurrencies 32 64
 ```
 
-Measure C1/C2/C4/C8 and capture at minimum:
+Capture at minimum:
 
 ```text
 vllm:spec_decode_num_accepted_tokens_total
@@ -179,11 +188,11 @@ vllm:spec_decode_num_drafts
 per-position acceptance
 ```
 
-A dynamic batch-size -> K schedule is an **experimental** follow-up only. Current
-vLLM supports `num_speculative_tokens_per_batch_size`, but its documentation says
-dynamic speculative decoding is tested with Eagle/Eagle3/DFlash; other methods
-may not work out of the box. The pinned dev306 DSpark path must be checked before
-using dynamic K in production.
+A dynamic batch-size -> K schedule remains an **experimental** follow-up only.
+Current vLLM supports `num_speculative_tokens_per_batch_size`, but its
+documentation says dynamic speculative decoding is tested with
+Eagle/Eagle3/DFlash; other methods may not work out of the box. The pinned
+dev306 DSpark path must be checked before using dynamic K in production.
 
 ## Phase 5 — prefix cache matrix: DSpark x CPU-KV
 

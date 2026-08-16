@@ -548,3 +548,46 @@ A tuning row or runtime change was promoted only if the relevant checks passed:
 
 This policy is intentionally conservative. The repository keeps a smaller table
 that is explainable and measured instead of a large collection of tuner output.
+
+## 20. DSpark K7 high-batch boundary
+
+The production DSpark K7 profile was compared with the native decoder while
+keeping the model, 3,072-token scheduler profile, GPU/CPU KV configuration,
+prompt family and 256-token concurrent outputs fixed. Each profile received a
+clean service restart and representative warm-up. Measurements that could have
+overlapped an interrupted client sweep were discarded; the C32/C64 values below
+are clean, standalone reruns from an idle engine. The decode-512 row uses the
+existing warm-up fixture, not the indexed high-concurrency prompt.
+
+The reproducible entry point is:
+
+```bash
+python3 scripts/bench/bench_high_concurrency.py \
+  --concurrencies 32 64 --max-tokens 256
+```
+
+Run the command separately against each serving profile. Do not launch native
+and speculative sweeps against the same live engine.
+
+| Decoder | warm-up decode-512 | C32 aggregate | C64 aggregate |
+| --- | ---: | ---: | ---: |
+| DSpark K7 | **141.7** | **730.2** | 914.6 |
+| native | 33.4 | 570.4 | **921.6** |
+
+All throughput values are aggregate completion tok/s and all tested requests
+completed successfully. The clean high-batch latency details were:
+
+```text
+DSpark K7 C32: p50 10.402s, p95 11.095s, acceptance 47.1%
+native    C32: p50 14.345s, p95 14.354s
+
+DSpark K7 C64: p50 16.947s, p95 17.799s, acceptance 47.1%
+native    C64: p50 17.709s, p95 17.754s
+```
+
+Native decode only catches the speculative path at the fully occupied C64
+boundary: its measured aggregate advantage there is about 0.8%, small enough to
+be treated as parity rather than a new default. K7 remains about 4.2x faster for
+decode-512, about 28% faster at C32, and retains the lower C64 median request
+latency. The service therefore keeps DSpark K7 as the production default; native
+decode remains a controlled extreme-throughput comparison only.

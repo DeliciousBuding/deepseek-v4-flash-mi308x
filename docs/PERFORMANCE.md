@@ -3,7 +3,7 @@
 This file separates **local measurements** from **community reference numbers**.
 The stable defaults remain frozen until an A/B improves the end-to-end coding-agent
 workload and still passes the 500K/context + tool-call correctness gates. See
-[`GPU_VALIDATION_PLAN.md`](GPU_VALIDATION_PLAN.md) for the next GPU run.
+[`GPU_VALIDATION_PLAN.md`](GPU_VALIDATION_PLAN.md) for controlled future experiments.
 
 ## Stable runtime provenance
 
@@ -74,8 +74,8 @@ changing those defaults: `MAX_MODEL_LEN`, `MAX_NUM_SEQS`,
 
 The ladder intentionally shares a prefix, so the later rows are not fresh-prefill
 benchmarks. Supporting a 524,288-token maximum does not allocate 512K KV to each
-short request; nevertheless, the next GPU run explicitly A/Bs the configured
-upper bound because planner/scheduler structures can still have measurable cost.
+short request; nevertheless, the validation plan retains a configured-ceiling
+A/B because planner/scheduler structures can still have measurable cost.
 
 ## Local prefix-cache and coding-agent results
 
@@ -113,8 +113,8 @@ Current coding-agent gate summary:
 | Metric | Current production result |
 | --- | ---: |
 | 30-turn per-request cached prompt tokens | **95.46%** |
-| ordinary hot TTFT | **~0.20–0.36s** |
-| average hot-trace decode | **167.3 tok/s** |
+| ordinary hot TTFT | **~0.23–0.38s** |
+| average hot-trace decode | **167.0 tok/s** |
 | auto tool-call survival | **100K 5/5; 200K 3/3; 100K concurrency=4 16/16** |
 | true-cold 200K isolation | **DEGRADED but improved: +1.30 / +1.33 / +1.41s at 3072** |
 
@@ -122,6 +122,7 @@ The repository now contains:
 
 - `bench_agent_trace.py` — one growing agent session;
 - `bench_session_concurrency.py` — independent long-lived sessions with idle/tool windows;
+- `bench_high_concurrency.py` — clean C32/C64 DSpark-vs-native boundary;
 - `bench_tool_roundtrip.py` — actual assistant tool call -> role=tool -> final answer,
   with forced/required/auto modes, long prefix and concurrent parser stress.
 
@@ -160,6 +161,27 @@ production tables.
 
 This fixed the initial regression where an early microbenchmark produced only
 ~63 tok/s aggregate at C2 and ~81 at C4. The v2 profile scales monotonically.
+
+### DSpark K7 high-batch boundary
+
+The production K7 path and native decoder were compared after separate clean
+restarts and warm-ups. The concurrent fixture uses indexed coding prompts with
+256-token outputs; it is not the same fixture as the C1-C8 table above.
+
+| Decoder | warm-up decode-512 | C32 aggregate | C64 aggregate |
+| --- | ---: | ---: | ---: |
+| DSpark K7 | **141.7** | **730.2** | 914.6 |
+| native | 33.4 | 570.4 | **921.6** |
+
+All C32/C64 requests completed, with zero final production preemptions. Native
+only reaches aggregate parity at full C64 admission: its measured advantage is
+about 0.8%, while K7 is about 28% faster at C32 and has lower C64 median request
+latency (16.947s versus 17.709s). K7 therefore remains the production default.
+Reproduce each profile separately with:
+
+```bash
+python3 scripts/bench/bench_high_concurrency.py --concurrencies 32 64
+```
 
 ## Local single-stream decode
 

@@ -33,6 +33,7 @@ Measured on the MI308X profile in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md):
 | Long-context ladder | **50K / 128K / 256K / 384K / 500K all pass** |
 | 512-token generation incl. TTFT | **141.8 tok/s** on the promoted 3072 profile |
 | C1 / C2 / C4 / C8 aggregate | **129.2 / 235.8 / 375.0 / 549.6 tok/s** |
+| High-batch K7 C32 / C64 aggregate | **730.2 / 914.6 tok/s** on the indexed 256-token fixture |
 | 500K ladder wall time | **77.3s** at 3072; **75.3s** at the 4096 throughput profile |
 | 30-turn per-request prefix-cache hit | **95.46%** (1,027,596 / 1,076,518 prompt tokens) |
 | Ordinary hot coding-agent TTFT | **~0.23–0.38s** in the 3072 promotion trace |
@@ -240,6 +241,7 @@ scripts/bench/
 ├── bench_latency.py               TTFT / decode latency fixture
 ├── bench_agent_trace.py           one growing agent; per-request cache accounting
 ├── bench_session_concurrency.py   N independent long-lived agent histories
+├── bench_high_concurrency.py      clean C32/C64 DSpark-vs-native boundary
 ├── bench_tool_roundtrip.py        streamed tool call -> tool result -> final answer
 ├── bench_ttft_isolation.py        short request injected during long prefill
 └── collect_shapes.py              runtime/GEMM shape helper
@@ -261,6 +263,7 @@ Examples:
 ```bash
 python3 scripts/bench/bench_agent_trace.py 30 20000
 python3 scripts/bench/bench_session_concurrency.py --sessions 4 --rounds 8
+python3 scripts/bench/bench_high_concurrency.py --concurrencies 32 64
 python3 scripts/bench/bench_tool_roundtrip.py --mode auto --prefix-tokens 100000 --rounds 10
 python3 scripts/bench/bench_tool_roundtrip.py --mode auto --prefix-tokens 100000 --rounds 16 --concurrency 4
 ```
