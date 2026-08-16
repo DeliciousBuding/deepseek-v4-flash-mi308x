@@ -14,37 +14,35 @@
 </div>
 
 This repository is a **reproducible serving recipe and benchmark harness** for
-running `deepseek-ai/DeepSeek-V4-Flash-0731` on one 192 GB-class gfx942 GPU.
-The primary workload is not a one-shot chatbot: it is a **long-lived coding
-agent** with a large stable prefix, growing multi-turn history, tool calls, and
-mixed cold/hot requests.
+`deepseek-ai/DeepSeek-V4-Flash-0731` on one 192 GB-class gfx942 GPU. The primary
+workload is a **long-lived coding agent**: large stable prefix, growing multi-turn
+history, streaming tool calls, mixed cold/hot requests, and a required ~500K
+context ceiling.
 
-The project intentionally pins the runtime and the historical upstream patch
-source that produced the validated MI308X baseline. Current upstream development
-is tracked and compared, but it is never silently mixed into the stable venv.
+The patch source is pinned by full commit SHA, the runtime is audited after
+restart, and performance changes are accepted only after end-to-end agent and
+correctness gates — not from a single tokens/s microbenchmark.
 
-## What is validated
+## Validated local baseline
 
-Measured on the local MI308X profile documented in
-[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md):
+Measured on the MI308X profile in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md):
 
-| Metric | Local result |
+| Metric | Result |
 |---|---:|
 | Configured context ceiling | **524,288 tokens** |
 | Long-context ladder | **50K / 128K / 256K / 384K / 500K all pass** |
-| 512-token single-stream generation, incl. TTFT | **133.5 tok/s** |
+| 512-token generation incl. TTFT | **133.5 tok/s** |
 | C1 / C2 / C4 / C8 aggregate | **128 / 197 / 286 / 446 tok/s** |
 | Repeated-prefix latency | **8.67s -> 0.49s (17.5x)** |
 | Last per-request cached-token trace | **99.4% (856K / 860K prompt tokens)** |
-| Hot coding-agent TTFT | **~0.21–0.32s** across trace revisions / warm states |
+| Hot coding-agent TTFT | **~0.21–0.32s** across trace/warm-state revisions |
 | Short request during 200K prefill | **+0.04s TTFT overhead** |
-| Streaming tool-call validation before last disconnect | **10/10 round trips** |
+| Last streaming tool-call validation | **10/10 round trips** |
 
-Those values are **local measurements**, not copied community numbers. The next
-GPU session re-runs the full regression suite with the updated benchmark harness
-before any runtime migration.
+The next GPU session re-establishes these numbers with the updated benchmark
+harness before changing the runtime.
 
-## Stable runtime
+## Stable runtime provenance
 
 ```text
 GPU        MI308X / MI300X class, gfx942, 192 GB
@@ -58,29 +56,37 @@ patch src  ryanzhou/deepseek-v4-flash-mi300x
            012b9945c1e61ec7a7c7de12da58e8c7cafd92ab
 ```
 
-The stable profile uses the historical upstream overlay set at that exact
-commit, plus one local sandbox compatibility overlay. It is **not** equivalent
-to the current public ryanzhou production main, which pins another vLLM nightly
-and a changed kernel/overlay set. Any upstream migration is therefore tested in
-a second environment rather than overwriting the known-good runtime.
+As of **2026-08-16**, that patch-source SHA is also the current upstream
+`ryanzhou/deepseek-v4-flash-mi300x` `main` commit. The serving runtimes are still
+not byte-identical:
 
-## Why the extra work is necessary on gfx942
+```text
+ryanzhou production: vLLM dev229 + AITER 0.1.19
+this recipe:         vLLM dev306 + AITER 0.1.19
+                     + activation=None compatibility edit for dev306
+                     + local sandbox madvise fallback patch
+```
+
+Pinning the full source SHA remains important: a future branch move must not
+silently change a reproducible install.
+
+## Why gfx942 needs a dedicated recipe
 
 DeepSeek-V4-Flash combines sparse MLA, MXFP4 experts, FP8/FNUZ-sensitive paths,
-DeepSeek-specific speculative decoding, and unusual long-context cache behavior.
-The validated gfx942 stack includes fixes/tuning for deterministic sparse top-k,
-ROCm DSpark verification, expert routing / SwiGLU behavior, sparse prefill,
-AITER GEMM shapes, block-table overhead, and native CPU-KV synchronization.
+DeepSeek-specific speculative decoding and long-context hybrid KV behavior. The
+validated gfx942 stack includes fixes/tuning for deterministic sparse top-k,
+ROCm DSpark verification, expert routing/SwiGLU correctness, sparse prefill,
+AITER GEMM shapes, block-table overhead and native CPU-KV synchronization.
 
-The public production work by
-[ryanzhou/deepseek-v4-flash-mi300x](https://github.com/ryanzhou/deepseek-v4-flash-mi300x)
-is the main upstream reference for this recipe; this repository ports the
-validated historical stack to a **native, Docker-less venv deployment** and adds
-sandbox recovery, long-context, coding-agent, cache and protocol validation.
+The primary upstream reference is
+[ryanzhou/deepseek-v4-flash-mi300x](https://github.com/ryanzhou/deepseek-v4-flash-mi300x).
+This project ports that source stack to a **native Docker-less dev306 venv** and
+adds restart recovery, provenance auditing, 500K-class validation, coding-agent
+benchmarks and sandbox-specific compatibility.
 
 ## Quick start
 
-### 1. Clone and prepare the exact patch source
+### 1. Pin the patch source
 
 ```bash
 git clone https://github.com/DeliciousBuding/vllm-rocm-dsv4-flash.git
@@ -88,8 +94,8 @@ cd vllm-rocm-dsv4-flash
 bash scripts/prepare_patch_repo.sh
 ```
 
-`prepare_patch_repo.sh` fetches and checks out the exact historical upstream
-commit used by the stable profile. It does not follow upstream `main`.
+`prepare_patch_repo.sh` fetches the exact full SHA above and checks the files
+required by the installer.
 
 ### 2. Create the isolated venv
 
@@ -100,18 +106,18 @@ bash scripts/env_setup.sh
 The venv uses `--system-site-packages` so the platform ROCm Torch build is reused
 rather than replaced. System Python/Torch remain untouched.
 
-### 3. Install the pinned runtime
+### 3. Install the pinned serving runtime
 
-Place the pinned vLLM, AITER and flydsl wheels in `${WHEELS:-/mnt/workspace/wheels}`,
-then run:
+Place the exact vLLM/AITER/flydsl wheels under
+`${WHEELS:-/mnt/workspace/wheels}`, then:
 
 ```bash
 bash scripts/install_vllm_nightly.sh
 ```
 
-The installer refuses to continue if the external patch checkout is not at the
-expected full commit SHA. It applies the overlays, validates artifacts, and
-persists the venv/AITER cache snapshots for restart recovery.
+The installer refuses to proceed if the patch checkout is not at the expected
+full SHA. It applies the overlays, validates artifacts, and persists venv/AITER
+snapshots for restart recovery.
 
 ### 4. Download the model
 
@@ -119,7 +125,7 @@ persists the venv/AITER cache snapshots for restart recovery.
 bash scripts/01_download_model.sh dsflash
 ```
 
-The serve path checks for all 48 weight shards before launch.
+The serve path checks for all **48 weight shards** before launch.
 
 ### 5. Audit and serve
 
@@ -128,34 +134,24 @@ python3 scripts/audit_runtime.py
 bash scripts/02_serve_vllm.sh dsflash
 ```
 
-`audit_runtime.py` verifies versions, external patch provenance, installed
-overlays, the patched C++ extension, sparse-prefill artifact and persistent
-restart snapshots.
+`audit_runtime.py` verifies the runtime versions, patch-source revision,
+installed overlays, patched C++ extension, sparse-prefill artifact and restart
+snapshots.
 
-## CPU-instance preparation before paying for GPU time
+## CPU-instance preparation
 
-For environments where persistent storage is shared between CPU and GPU
-instances, run:
+If CPU/GPU instances share persistent storage, finish the cheap work first:
 
 ```bash
 bash scripts/preflight_cpu.sh
 ```
 
-The CPU preflight performs every useful non-GPU check first:
+It checks shell/Python syntax, pins the upstream source SHA, verifies 48/48 model
+shards, validates exact vLLM/AITER/flydsl wheel archives, checks persistent
+venv/JIT/AITER snapshots, and reports storage headroom. A CPU-preflight failure
+should be fixed **before paying for GPU time**.
 
-- shell and Python benchmark syntax;
-- exact historical patch checkout;
-- all 48 model shards and metadata;
-- exact vLLM/AITER/flydsl wheel inventory + ZIP integrity;
-- venv / AITER / JIT persistent tarball readability;
-- persistent-disk headroom.
-
-A failed CPU preflight is a storage/source problem and should be fixed before
-switching to a GPU instance.
-
-## Production launch profile
-
-The stable `dsflash` defaults are:
+## Stable launch profile
 
 ```text
 --max-model-len 524288
@@ -179,13 +175,10 @@ DSpark: K=7, probabilistic drafting, block rejection
 --gpu-memory-utilization 0.95
 ```
 
-The 12 GB CPU-KV tier is a **host constraint**, not a general recommendation:
-the validated sandbox exposes only a 16 GB `/dev/shm`. Bare-metal systems may
-support a much larger native CPU tier.
+The 12 GB native CPU-KV tier is a host constraint, not a general recommendation:
+the validated sandbox exposes only a 16 GB `/dev/shm`.
 
 ### A/B without editing the launcher
-
-The performance-sensitive knobs are environment variables:
 
 ```bash
 MAX_MODEL_LEN=524288
@@ -200,97 +193,115 @@ GPU_MEMORY_UTILIZATION=0.95
 MOE_BACKEND=triton
 ```
 
-Example native-decoder baseline:
+Examples:
 
 ```bash
+# Native decoder control
 DSPARK_ENABLED=0 bash scripts/02_serve_vllm.sh dsflash
-```
 
-Example scheduler-budget A/B:
-
-```bash
+# Scheduler-budget comparison
 MAX_BATCHED_TOKENS=2048 bash scripts/02_serve_vllm.sh dsflash
 ```
 
-The defaults remain unchanged until a candidate wins the complete agent workload
-and correctness gates.
+Defaults stay unchanged until a candidate wins the full agent/correctness matrix.
 
 ## Coding-agent benchmark suite
 
-The benchmark directory covers different failure/performance modes instead of
-collapsing everything into a single tokens/s number:
-
 ```text
 scripts/bench/
-├── bench_full.py                  general decode/prefill/cache/context suite
+├── bench_full.py                  decode/prefill/cache/context suite
 ├── bench_latency.py               TTFT / decode latency fixture
-├── bench_agent_trace.py           long-lived single agent, per-request cache accounting
-├── bench_session_concurrency.py   N independent growing agent histories
-├── bench_tool_roundtrip.py        streamed tool-call -> tool-result -> final answer
+├── bench_agent_trace.py           one growing agent; per-request cache accounting
+├── bench_session_concurrency.py   N independent long-lived agent histories
+├── bench_tool_roundtrip.py        streamed tool call -> tool result -> final answer
 ├── bench_ttft_isolation.py        short request injected during long prefill
-└── collect_shapes.py              GEMM / runtime-shape inspection helper
+└── collect_shapes.py              runtime/GEMM shape helper
 ```
 
-The multi-turn cache metric uses each response's
-`usage.prompt_tokens_details.cached_tokens`. Engine-global Prometheus counter
-deltas are diagnostic only because they can include unrelated concurrent traffic.
+Important benchmark semantics:
 
-Full tool protocol testing is intentionally separate from the synthetic
-performance trace: a `role=tool` message is only emitted when it has a matching
-assistant tool-call ID.
+- cache hit attribution uses each response's
+  `usage.prompt_tokens_details.cached_tokens`;
+- global Prometheus cache counters are diagnostic only under concurrent traffic;
+- hidden `reasoning_content` is **not** replayed into history by default;
+  `--include-reasoning-history` provides the explicit comparison;
+- performance traces never forge an orphan `role=tool` message;
+- actual tool protocol is tested by `bench_tool_roundtrip.py`, including
+  `forced` / `required` / `auto`, long prefixes and concurrent streaming.
 
-## 500K context and "adaptive" usage
+Examples:
 
-`--max-model-len 524288` is an admission/configuration ceiling, not a command to
-pre-allocate 512K KV for every short request. Paged KV/cache blocks are consumed
-as requests actually grow. A larger configured ceiling can still influence some
-planner/scheduler structures, so the next validation plan explicitly compares
-256K / 384K / 512K ceilings on identical short requests rather than assuming the
-upper bound is free.
+```bash
+python3 scripts/bench/bench_agent_trace.py 30 20000
+python3 scripts/bench/bench_session_concurrency.py --sessions 4 --rounds 8
+python3 scripts/bench/bench_tool_roundtrip.py --mode auto --prefix-tokens 100000 --rounds 10
+python3 scripts/bench/bench_tool_roundtrip.py --mode auto --prefix-tokens 100000 --rounds 16 --concurrency 4
+```
+
+## 500K context is an upper bound, not a per-request reservation
+
+`--max-model-len 524288` does not make every short request consume 512K worth of
+KV blocks. Paged KV/cache blocks are used as requests actually grow. A larger
+configured bound can still influence planner/scheduler/admission structures, so
+the GPU validation plan explicitly A/Bs 256K / 384K / 512K ceilings on identical
+short requests instead of assuming the larger ceiling is completely free.
 
 The product requirement remains: **allow approximately 500K context while
 preserving short-request latency and concurrency as much as possible.**
 
-## Prefix caching for agents
+## Prefix caching for coding agents
 
-Cache identity is based on token-prefix blocks, **not conversation IDs**. For a
-coding harness, keep the stable material first:
+Cache identity comes from token-prefix blocks, **not conversation IDs**. Keep
+stable material first:
 
 ```text
 system instructions
 -> stable tool schemas
 -> repository / AGENTS.md / policy context
 -> growing conversation
--> newest tool output / user turn
+-> newest environment/tool output
 ```
 
-Avoid injecting timestamps, random IDs, unstable JSON key order, or reordered
-tool schemas near the front of the prompt. If several untrusted users/agents
-share one endpoint, use a per-trust-group `cache_salt` so prefix reuse is
-isolated appropriately.
+Avoid timestamps, random request IDs, unstable JSON serialization, or reordered
+tool schemas near the front. For untrusted multi-tenant sharing, use a per-trust-
+group `cache_salt` to isolate prefix reuse.
 
-## Rejected experiments on the pinned dev306 runtime
+## Current upstream comparison
 
-Two FULL_AND_PIECEWISE graph-capture experiments were slower on this stack —
-including a second pass extended through the 4096-token chunk size — while
-consuming additional HBM and startup time. They remain disabled by default.
-DSpark K=5 also lost to K=7 for the measured single-stream latency path.
+Current upstream `main` is the same pinned source commit. Its production README
+reports:
 
-Do not repeat those exact experiments unless the runtime/kernel stack changes.
-Details and numbers are in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+| Metric | Upstream production |
+|---|---:|
+| Runtime | vLLM dev229 + AITER 0.1.19 |
+| Uncached C1 prefill | **11.69K tok/s steady** (11.53K median) |
+| Static DSpark-7 C1 | 152.6 aggregate / **158.8 median per stream** |
+| Native C1 | 67.3 aggregate |
+| C64 K7 burst | **1,278 aggregate** |
+| Context | **384K validated** (architecture supports 1M) |
+| KV | 16 GB GPU + 96 GiB native CPU tier |
+| Scheduler | 4096 budget; 384 reserved for spec, up to 3712 ordinary prefill |
 
-## Next GPU session
+These are reference points, not a direct transplant target. Our runtime base,
+CPU-KV capacity and ~500K context requirement differ.
 
-The ordered test matrix is in
-[`docs/GPU_VALIDATION_PLAN.md`](docs/GPU_VALIDATION_PLAN.md). It starts with a
-runtime audit and default-profile regression, then measures scheduler budget,
-DSpark vs native decoding, configured context-ceiling overhead, CPU-KV behavior,
-and only afterward an isolated experiment against current upstream main.
+## Known issue-aware validation
 
-vLLM's current tuning guidance makes `max_num_batched_tokens` a workload tradeoff:
-smaller budgets favor decode/ITL while larger budgets favor prefill/TTFT and
-throughput. The correct value here is therefore selected from the coding-agent
-trace, not copied blindly from another deployment.
+The next GPU session explicitly tests failure classes currently reported in vLLM:
+long-context DeepSeek-V4 DSML tool-call leakage, parser corruption under concurrent
+streaming, DSpark hybrid-prefix-cache interactions, and speculative decoding
+becoming throughput-negative at high batch size.
+
+See [`docs/GPU_VALIDATION_PLAN.md`](docs/GPU_VALIDATION_PLAN.md) for the ordered
+correctness/performance matrix.
+
+## Rejected experiments on dev306
+
+Two FULL_AND_PIECEWISE graph-capture experiments were slower on this pinned
+runtime — including a second pass extended through the 4096-token chunk size —
+while consuming additional HBM/startup time. DSpark K=5 also lost to K=7 for the
+measured single-stream path. Do not repeat those exact tests unless the runtime
+or kernel stack changes.
 
 ## Repository layout
 
@@ -318,35 +329,22 @@ trace, not copied blindly from another deployment.
     └── bench/
 ```
 
-## Upstream reference snapshot
-
-At the time of this update, the current public ryanzhou MI300X production README
-reports a pinned `dev229` vLLM stack with **11.69K tok/s steady uncached C1
-prefill**, **158.8 tok/s median per-stream static DSpark-7 decode**, a **1,278
-tok/s C64 burst**, and **384K validated context**. Its production scheduler uses
-a 4096-token budget with capacity reserved for speculative verification.
-
-Those numbers are a useful reference, not an automatic target/config transplant:
-the runtime revision, overlay inventory, host CPU-KV capacity and this project's
-500K requirement differ.
-
 ## References
 
-- [vLLM](https://github.com/vllm-project/vllm) — serving engine
-- [vLLM optimization and tuning](https://docs.vllm.ai/en/latest/configuration/optimization/) — chunked-prefill / scheduler-budget tradeoffs
-- [vLLM speculative configuration](https://docs.vllm.ai/en/latest/api/vllm/config/speculative/) — speculative and dynamic-K configuration
-- [vLLM automatic prefix caching](https://docs.vllm.ai/en/stable/design/prefix_caching/) — block-hash cache design
-- [ryanzhou/deepseek-v4-flash-mi300x](https://github.com/ryanzhou/deepseek-v4-flash-mi300x) — primary gfx942 production reference and source of the historical overlay stack
-- [DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) — model checkpoint
+- [vLLM](https://github.com/vllm-project/vllm)
+- [vLLM optimization and tuning](https://docs.vllm.ai/en/latest/configuration/optimization/)
+- [vLLM speculative configuration](https://docs.vllm.ai/en/latest/api/vllm/config/speculative/)
+- [vLLM automatic prefix caching](https://docs.vllm.ai/en/stable/design/prefix_caching/)
+- [ryanzhou/deepseek-v4-flash-mi300x](https://github.com/ryanzhou/deepseek-v4-flash-mi300x)
+- [DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)
 
 ## Contributing
 
-Issues and patches are welcome, particularly reproducible improvements to
-fresh-prefill throughput, low-concurrency decode, long-context stability, cache
-retention, or tool-call correctness on gfx942. See
-[`CONTRIBUTING.md`](CONTRIBUTING.md).
+Reproducible improvements to fresh-prefill throughput, low-concurrency decode,
+long-context correctness, cache retention or tool-call reliability on gfx942 are
+welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
-The repository code is licensed under Apache-2.0. Model weights and upstream
-components retain their own licenses and are not redistributed here.
+Repository code is Apache-2.0. Model weights and upstream components retain their
+own licenses and are not redistributed here.
