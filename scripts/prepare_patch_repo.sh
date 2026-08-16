@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Prepare the exact upstream patch source used by the validated MI308X profile.
-# This intentionally pins a historical commit; current upstream main has a
-# materially different runtime/overlay set and belongs in a separate A/B.
+#
+# As of 2026-08-16 this revision is also ryanzhou upstream main. We still pin the
+# full SHA so a future branch move cannot silently change a reproducible install.
+# Note that our runtime base is dev306 while ryanzhou's production image is
+# dev229, so identical overlay source does NOT mean byte-identical runtime.
 set -euo pipefail
 
 REPO_URL="${PATCH_REPO_URL:-https://github.com/ryanzhou/deepseek-v4-flash-mi300x.git}"
@@ -24,9 +27,8 @@ if [ -n "$(git -C "$DEST" status --porcelain --untracked-files=no)" ]; then
   exit 1
 fi
 
-# The commit remains addressable even if upstream main is rewritten. Fetch the
-# exact object explicitly so a fresh host does not depend on current branch
-# history or tag names.
+# Fetch the exact object explicitly so a fresh host does not depend on a branch
+# name, tag, or the future state of upstream main.
 echo "[patch-repo] fetching pinned revision $REV"
 git -C "$DEST" fetch --no-tags origin "$REV"
 git -C "$DEST" checkout --detach "$REV"
@@ -37,7 +39,6 @@ if [ "$ACTUAL" != "$REV" ]; then
   exit 1
 fi
 
-# Files required by install_vllm_nightly.sh. Fail early before touching vLLM.
 required=(
   patches/gpt_oss_triton_kernels_moe.row-i8asym-candidate.py
   patches/mxfp4.fused-silu.py
