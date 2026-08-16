@@ -4,15 +4,16 @@
 Run this after a host/bootstrap restart and before performance testing. It does
 not modify the environment. The script verifies runtime versions, checks every
 Python overlay byte-for-byte against its declared source, validates the patched
-C++ extension and sparse-prefill module, and prints Git revisions for both this
-recipe and the external patch repository.
+C++ extension and sparse-prefill module, and verifies the exact historical
+upstream patch revision used by the stable MI308X profile.
 
 Usage:
   python3 scripts/audit_runtime.py
 
 Environment overrides:
-  VLLM_VENV   default /root/.venvs/vllm
-  PATCH_REPO  default /mnt/workspace/deepseek-v4-flash-mi300x
+  VLLM_VENV       default /root/.venvs/vllm
+  PATCH_REPO      default /mnt/workspace/deepseek-v4-flash-mi300x
+  PATCH_REPO_REV  override only when intentionally validating another stack
 """
 from __future__ import annotations
 
@@ -20,10 +21,12 @@ import hashlib
 import os
 from pathlib import Path
 import subprocess
-import sys
 
 VENV = Path(os.environ.get("VLLM_VENV", "/root/.venvs/vllm"))
 PATCH_REPO = Path(os.environ.get("PATCH_REPO", "/mnt/workspace/deepseek-v4-flash-mi300x"))
+EXPECTED_PATCH_REPO_REV = os.environ.get(
+    "PATCH_REPO_REV", "012b9945c1e61ec7a7c7de12da58e8c7cafd92ab"
+)
 RECIPE_REPO = Path(__file__).resolve().parent.parent
 OWN_PATCHES = RECIPE_REPO / "patches"
 
@@ -59,9 +62,9 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def run(cmd: list[str], *, check: bool = False) -> str:
+def run(cmd: list[str]) -> str:
     p = subprocess.run(cmd, text=True, stdout=subprocess.PIPE,
-                       stderr=subprocess.STDOUT, check=check)
+                       stderr=subprocess.STDOUT, check=False)
     return p.stdout.strip()
 
 
@@ -98,11 +101,20 @@ def main() -> int:
 
     pyver = run([str(py), "-c", "import sys; print(f'python{sys.version_info.major}.{sys.version_info.minor}')"])
     site = VENV / "lib" / pyver / "site-packages"
+    recipe_head = git_head(RECIPE_REPO)
+    patch_head = git_head(PATCH_REPO)
     print()
     print("=== revisions ===")
-    print(f"recipe_repo={git_head(RECIPE_REPO)}")
-    print(f"patch_repo={git_head(PATCH_REPO)}")
+    print(f"recipe_repo={recipe_head}")
+    print(f"patch_repo={patch_head}")
+    print(f"expected_patch_repo={EXPECTED_PATCH_REPO_REV}")
     print(f"site_packages={site}")
+    if patch_head != EXPECTED_PATCH_REPO_REV:
+        failures.append(
+            "external patch repo revision drift: expected "
+            f"{EXPECTED_PATCH_REPO_REV}, got {patch_head}; run "
+            "scripts/prepare_patch_repo.sh before reinstall/serve"
+        )
 
     print()
     print("=== overlay byte audit ===")
@@ -174,9 +186,9 @@ def main() -> int:
 
     print("AUDIT PASSED: runtime matches the declared stable stack.")
     print(
-        "NOTE: this proves consistency with THIS recipe, not equivalence to the "
-        "latest ryanzhou production stack. Compare patch_repo revision/overlay "
-        "inventory separately before any upstream migration."
+        "NOTE: this proves consistency with the historical stable stack, not "
+        "equivalence to ryanzhou's current public main. Current-main migration "
+        "must be tested in a separate venv."
     )
     return 0
 
