@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """Audit the installed vLLM runtime against this repository's declared stack.
 
-Run this after a host/bootstrap restart and before performance testing. It does
-not modify the environment. The script verifies runtime versions, checks every
-Python overlay byte-for-byte against its declared source, validates the patched
-C++ extension and sparse-prefill module, and verifies the exact historical
-upstream patch revision used by the stable MI308X profile.
+Run after a host/bootstrap restart and before performance testing. The audit is
+read-only: it verifies runtime versions, the exact upstream patch-source SHA,
+installed overlay bytes, the patched C++ extension, sparse-prefill artifact,
+and persistent restart snapshots.
 
-Usage:
-  python3 scripts/audit_runtime.py
-
-Environment overrides:
-  VLLM_VENV       default /root/.venvs/vllm
-  PATCH_REPO      default /mnt/workspace/deepseek-v4-flash-mi300x
-  PATCH_REPO_REV  override only when intentionally validating another stack
+As of 2026-08-16 the pinned patch-source SHA is also ryanzhou upstream main.
+The meaningful production difference is runtime base: upstream uses dev229,
+while this recipe ports the overlays onto dev306 plus two compatibility/local
+changes. Matching source provenance therefore does not claim byte-identical
+serving runtimes.
 """
 from __future__ import annotations
 
@@ -63,8 +60,13 @@ def sha256(path: Path) -> str:
 
 
 def run(cmd: list[str]) -> str:
-    p = subprocess.run(cmd, text=True, stdout=subprocess.PIPE,
-                       stderr=subprocess.STDOUT, check=False)
+    p = subprocess.run(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
     return p.stdout.strip()
 
 
@@ -82,7 +84,8 @@ def main() -> int:
         return 2
 
     version_probe = run([
-        str(py), "-c",
+        str(py),
+        "-c",
         "import importlib.metadata as m, torch, vllm, flydsl; "
         "print('python=',__import__('sys').version.split()[0]); "
         "print('vllm=',vllm.__version__); "
@@ -99,10 +102,15 @@ def main() -> int:
     if "0.26.1rc1.dev306" not in version_probe:
         failures.append("vLLM is not the pinned dev306 runtime")
 
-    pyver = run([str(py), "-c", "import sys; print(f'python{sys.version_info.major}.{sys.version_info.minor}')"])
+    pyver = run([
+        str(py),
+        "-c",
+        "import sys; print(f'python{sys.version_info.major}.{sys.version_info.minor}')",
+    ])
     site = VENV / "lib" / pyver / "site-packages"
     recipe_head = git_head(RECIPE_REPO)
     patch_head = git_head(PATCH_REPO)
+
     print()
     print("=== revisions ===")
     print(f"recipe_repo={recipe_head}")
@@ -133,17 +141,21 @@ def main() -> int:
             print(f"MISS target [{origin:8s}] {dst_rel}")
             failures.append(f"missing installed target: {dst_rel}")
             continue
+
         s_src = sha256(src)
         s_dst = sha256(dst)
         ok = s_src == s_dst
-        # The mxfp4 overlay receives one compatibility-only signature edit on
-        # dev306 (activation=None); its installed bytes intentionally differ.
+
+        # dev306's caller still passes activation=. The upstream mxfp4 overlay
+        # omits that argument, so the installed file intentionally receives one
+        # signature-only compatibility edit after overlay copy.
         if src_name == "mxfp4.fused-silu.py" and not ok:
             text = dst.read_text(errors="ignore")
             if "activation=None" in text:
                 print(f"COMPAT     [{origin:8s}] {src_name} -> {dst_rel}")
                 matched += 1
                 continue
+
         print(f"{'OK' if ok else 'DIFF':6s}     [{origin:8s}] {src_name} -> {dst_rel}")
         if ok:
             matched += 1
@@ -184,11 +196,11 @@ def main() -> int:
             print(f"  - {item}")
         return 1
 
-    print("AUDIT PASSED: runtime matches the declared stable stack.")
+    print("AUDIT PASSED: runtime matches the declared stable dev306 port.")
     print(
-        "NOTE: this proves consistency with the historical stable stack, not "
-        "equivalence to ryanzhou's current public main. Current-main migration "
-        "must be tested in a separate venv."
+        "Patch-source provenance matches the pinned upstream SHA. This does not "
+        "claim equivalence to upstream's dev229 production runtime; test any "
+        "dev229 comparison in a second venv."
     )
     return 0
 
