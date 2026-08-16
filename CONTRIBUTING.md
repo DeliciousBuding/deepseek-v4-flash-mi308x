@@ -4,9 +4,9 @@ Thanks for your interest in contributing to deepseek-v4-flash-mi308x!
 
 This repository is a production recipe for serving DeepSeek-V4-Flash-0731 on a single AMD Instinct accelerator. Contributions in any of these areas are especially welcome:
 
-- **Performance**: anything that closes the measured 112 → 168 tok/s single-stream gap (kernel flags, GEMM tuning tables, DSpark configurations).
+- **Performance**: anything that closes the remaining measured ~141.8 → 168 tok/s single-stream gap (kernel flags, GEMM tuning tables, DSpark configurations).
 - **Stability**: reproductions of crashes with minimal scripts, fixes for long-context edge cases.
-- **Models**: launch configs for additional models that fit a 192 GB MI300X/MI308X.
+- **Runtime compatibility**: focused ports and validation for newer pinned vLLM, AITER, ROCm, or DeepSeek-V4-Flash revisions.
 - **Docs**: corrections, clearer instructions, benchmark methodology.
 
 ## Ground rules

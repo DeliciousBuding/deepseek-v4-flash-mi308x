@@ -21,13 +21,25 @@ MODEL = "deepseek-v4-flash"
 
 
 def api_key() -> str:
-    value = os.environ.get("VLLM_API_KEY")
-    if value:
-        return value
-    path = os.environ.get(
-        "VLLM_API_KEY_FILE", "/mnt/workspace/.bootstrap/vllm_api_key"
-    )
-    return Path(path).read_text(encoding="utf-8").strip()
+    configured_api_key = os.environ.get("VLLM_API_KEY")
+    if configured_api_key:
+        return configured_api_key
+
+    api_key_file = os.environ.get("VLLM_API_KEY_FILE")
+    if not api_key_file:
+        raise RuntimeError(
+            "No API key configured; set VLLM_API_KEY or VLLM_API_KEY_FILE"
+        )
+
+    try:
+        resolved_api_key = Path(api_key_file).read_text(encoding="utf-8").strip()
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"VLLM_API_KEY_FILE does not exist: {api_key_file}"
+        ) from exc
+    if not resolved_api_key:
+        raise RuntimeError(f"VLLM_API_KEY_FILE is empty: {api_key_file}")
+    return resolved_api_key
 
 
 def stream_request(prompt: str, max_tokens: int) -> float:

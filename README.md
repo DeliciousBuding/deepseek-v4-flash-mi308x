@@ -144,6 +144,10 @@ python3 scripts/audit_runtime.py
 # hot copy. The launcher auto-prefers it only when all 48 shards validate.
 bash scripts/stage_model_local.sh dsflash
 
+# Optional but recommended outside an already protected private network. The
+# same environment variable is consumed by the benchmark clients.
+export VLLM_API_KEY_FILE=/run/secrets/vllm_api_key
+
 bash scripts/02_serve_vllm.sh dsflash
 
 # In a second shell after /health is ready, cover real first-use JIT paths and
@@ -334,7 +338,9 @@ or kernel stack changes.
 ├── LICENSE
 ├── CONTRIBUTING.md
 ├── docs/
+│   ├── ARCHITECTURE.md
 │   ├── PERFORMANCE.md
+│   ├── PUBLIC_PRIVATE_BOUNDARY.md
 │   ├── TUNING_LOG_2026-08-16.md
 │   └── GPU_VALIDATION_PLAN.md
 ├── patches/

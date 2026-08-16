@@ -152,9 +152,21 @@ fi
 # injected, ask vLLM to enforce it. Otherwise the caller must keep this backend
 # private or protect it at a gateway/ingress layer.
 AUTH_ARGS=()
-if [ -n "${VLLM_API_KEY:-}" ]; then
-  AUTH_ARGS+=(--api-key "$VLLM_API_KEY")
-  echo "[auth] API key injected from environment"
+API_KEY_VALUE="${VLLM_API_KEY:-}"
+if [ -z "$API_KEY_VALUE" ] && [ -n "${VLLM_API_KEY_FILE:-}" ]; then
+  if [ ! -r "$VLLM_API_KEY_FILE" ]; then
+    echo "[auth] VLLM_API_KEY_FILE is not readable: $VLLM_API_KEY_FILE" >&2
+    exit 1
+  fi
+  API_KEY_VALUE="$(<"$VLLM_API_KEY_FILE")"
+fi
+
+if [ -n "$API_KEY_VALUE" ]; then
+  AUTH_ARGS+=(--api-key "$API_KEY_VALUE")
+  echo "[auth] API key injected"
+elif [ -n "${VLLM_API_KEY_FILE:-}" ]; then
+  echo "[auth] VLLM_API_KEY_FILE is empty: $VLLM_API_KEY_FILE" >&2
+  exit 1
 else
   echo "[auth] no API key configured"
 fi

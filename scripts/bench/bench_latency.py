@@ -12,9 +12,25 @@
 """
 import json, urllib.request, time, sys, os
 
-KEY = os.environ.get("VLLM_API_KEY") or open(
-    os.environ.get("VLLM_API_KEY_FILE", "/mnt/workspace/.bootstrap/vllm_api_key")
-).read().strip()
+def resolve_api_key():
+    configured_api_key = os.environ.get("VLLM_API_KEY")
+    if configured_api_key:
+        return configured_api_key
+
+    api_key_file = os.environ.get("VLLM_API_KEY_FILE")
+    if not api_key_file:
+        raise RuntimeError(
+            "No API key configured; set VLLM_API_KEY or VLLM_API_KEY_FILE"
+        )
+
+    with open(api_key_file, encoding="utf-8") as api_key_stream:
+        resolved_api_key = api_key_stream.read().strip()
+    if not resolved_api_key:
+        raise RuntimeError(f"VLLM_API_KEY_FILE is empty: {api_key_file}")
+    return resolved_api_key
+
+
+KEY = resolve_api_key()
 URL = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000") + "/v1/chat/completions"
 
 def chat_stream(prompt, max_tokens=256, temperature=0.0):

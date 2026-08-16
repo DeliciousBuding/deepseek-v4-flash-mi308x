@@ -44,11 +44,11 @@ true-cold 200K isolation           KNOWN DEGRADED: +1.30 / +1.33 / +1.41s at 307
 
 ## Phase 0 — runtime integrity before serving
 
-After the human switches to the GPU instance and runs the private bootstrap
-once, the agent must **not reinstall first**.
+After the operator switches to the GPU instance and completes that deployment's
+bootstrap, do **not reinstall first**.
 
 ```bash
-cd /mnt/workspace/deepseek-v4-flash-mi308x
+cd "${RECIPE_ROOT:?set RECIPE_ROOT to the deepseek-v4-flash-mi308x checkout}"
 git pull --ff-only
 python3 scripts/audit_runtime.py
 ```

@@ -45,17 +45,27 @@ DSML_HINTS = ("DSML", "invoke name=", "tool_calls>", "parameter name=")
 
 
 def api_key() -> str:
-    value = os.environ.get("VLLM_API_KEY")
-    if value:
-        return value
-    path = os.environ.get("VLLM_API_KEY_FILE", "/mnt/workspace/.bootstrap/vllm_api_key")
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read().strip()
-    except FileNotFoundError as exc:
+    configured_api_key = os.environ.get("VLLM_API_KEY")
+    if configured_api_key:
+        return configured_api_key
+
+    api_key_file = os.environ.get("VLLM_API_KEY_FILE")
+    if not api_key_file:
         raise RuntimeError(
             "No API key configured; set VLLM_API_KEY or VLLM_API_KEY_FILE"
+        )
+
+    try:
+        with open(api_key_file, encoding="utf-8") as api_key_stream:
+            resolved_api_key = api_key_stream.read().strip()
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"VLLM_API_KEY_FILE does not exist: {api_key_file}"
         ) from exc
+
+    if not resolved_api_key:
+        raise RuntimeError(f"VLLM_API_KEY_FILE is empty: {api_key_file}")
+    return resolved_api_key
 
 
 def stable_system(prefix_tokens: int) -> str:

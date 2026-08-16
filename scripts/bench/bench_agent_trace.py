@@ -49,17 +49,27 @@ def api_key() -> str:
     Keeping this lazy makes imports and ``--help`` safe on CI/developer hosts
     that intentionally do not have the private DSW key file.
     """
-    value = os.environ.get("VLLM_API_KEY")
-    if value:
-        return value
-    path = os.environ.get("VLLM_API_KEY_FILE", "/mnt/workspace/.bootstrap/vllm_api_key")
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read().strip()
-    except FileNotFoundError as exc:
+    configured_api_key = os.environ.get("VLLM_API_KEY")
+    if configured_api_key:
+        return configured_api_key
+
+    api_key_file = os.environ.get("VLLM_API_KEY_FILE")
+    if not api_key_file:
         raise RuntimeError(
             "No API key configured; set VLLM_API_KEY or VLLM_API_KEY_FILE"
+        )
+
+    try:
+        with open(api_key_file, encoding="utf-8") as api_key_stream:
+            resolved_api_key = api_key_stream.read().strip()
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"VLLM_API_KEY_FILE does not exist: {api_key_file}"
         ) from exc
+
+    if not resolved_api_key:
+        raise RuntimeError(f"VLLM_API_KEY_FILE is empty: {api_key_file}")
+    return resolved_api_key
 
 
 def make_repo_context(target_tokens: int) -> str:

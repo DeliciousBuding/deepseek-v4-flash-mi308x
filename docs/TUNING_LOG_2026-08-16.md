@@ -278,7 +278,7 @@ samples around 12.18K tok/s in the long-prompt path.
 
 ### 12.1 30-turn agent trace
 
-Current 30-turn result:
+Pre-promotion 4,096 throughput-profile result, retained for comparison:
 
 ```text
 session total: 26.8s
@@ -292,6 +292,15 @@ per-request prefix-cache hit: 95.46%
 Every fourth-style environment/tool growth event intentionally adds a large new
 suffix, briefly reducing the request's cache percentage into the low/mid 90s;
 subsequent turns return to roughly 99%.
+
+The promoted 3,072 production-profile rerun supersedes those headline values:
+
+```text
+session total: 24.8s
+avg decode: 167.0 tok/s
+per-request prefix-cache hit: 95.46%
+  1,027,596 / 1,076,518 prompt tokens
+```
 
 ### 12.2 auto tool calls
 
