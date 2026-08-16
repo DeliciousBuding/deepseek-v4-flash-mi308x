@@ -85,7 +85,7 @@ Simple repeated-prefix fixture (~18K-token prefix):
 | --- | ---: |
 | cold | 8.67s |
 | hot | 0.49s |
-| speedup | **17.5x** |
+| speedup | **17.7x** |
 
 vLLM APC matches token-prefix blocks, not a conversation ID. Keep stable system
 instructions, tool schemas and repository context first; append changing history
@@ -145,10 +145,12 @@ isolation therefore improved materially but still fails the strict +0.5s gate.
 
 A 2,048 budget was rejected: the 200K long request stretched to 51.4–54.1s and
 two samples still varied from +1.16 to +2.98s. Forcing the 1,024 cap even for a
-solo long request was also rejected; it made the long request slower and produced
-about +3.08s added TTFT. Extra M~1024/1031/1032 GEMM rows had large operator wins
-but did not improve the end-to-end isolation objective, so they remain out of the
-production tables.
+solo long request was also rejected: the steady-state 200K prefill stretched from
+46.1s to 59.5s (~29% prefill time, ~22% throughput loss) while the short-request
+isolation only improved to about +0.98s. An earlier +3.08s reading for this cap
+was a first-round JIT artifact, not a steady-state result. Extra M~1024/1031/1032
+GEMM rows had large operator wins but did not improve the end-to-end isolation
+objective, so they remain out of the production tables.
 
 ## Local concurrency
 
@@ -333,7 +335,7 @@ Major changes:
 - sandbox `MADV_POPULATE_WRITE` fallback patch.
 
 Measured direction: decode-512 90.6 -> 133.5, C1 76 -> 128,
-C4 177 -> 286, C8 372 -> 446, repeated-prefix speedup ~14x -> 17.5x.
+C4 177 -> 286, C8 372 -> 446, repeated-prefix speedup ~14x -> 17.7x.
 
 ### Rejected experiments on dev306
 
@@ -342,7 +344,7 @@ C4 177 -> 286, C8 372 -> 446, repeated-prefix speedup ~14x -> 17.5x.
 | FULL_AND_PIECEWISE graph capture through 3712 | cold prefill 2509 vs 3222 tok/s; decode flat; ~+10 GB HBM; slower startup | reject |
 | same capture extended through 3840/4096 | cold prefill 2504 tok/s; decode flat | reject |
 | DSpark K=5 vs K=7 | 121.7 vs 133.5 tok/s at decode-512 | keep K=7 for C1 latency |
-| Force 1024 cap for solo long prefill | 200K total ~62s and short overhead ~+3.08s | reject; production scheduler unchanged |
+| Force 1024 cap for solo long prefill | 200K prefill 59.5s (vs 46.1s) and short overhead ~+0.98s | reject; +29% prefill time not worth a +0.32s isolation gain |
 | MI308X 1K-shape expansion | operator wins, but true-cold 200K isolation did not improve (+2.94s in one run) | keep out of production table |
 
 Do not repeat the two graph experiments without changing the runtime base or

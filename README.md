@@ -95,6 +95,16 @@ AITER `(gfx, cu_num)` key and selects the repository's measured 80-CU tables.
 
 ## Quick start
 
+### 0. Verify the environment
+
+```bash
+bash scripts/00_check_env.sh
+```
+
+Reports the ROCm/torch versions, the detected AITER `(gfx, cu_num)` key, wheel and
+model-shard presence, and disk headroom. Fix failures here before paying for GPU
+time.
+
 ### 1. Pin the patch source
 
 ```bash
@@ -162,6 +172,21 @@ snapshots. Runtime-generated AITER, torch-extension, ROCm COMGR and Triton cache
 are warm-start accelerators. `warmup_runtime.sh` covers representative first-use
 paths; `snapshot_runtime_state.sh` atomically replaces the production venv
 snapshot and persists all warm caches.
+
+### 6. Verify the server and run a benchmark
+
+```bash
+# In a second shell once the server reports /health ready:
+curl -s http://localhost:8000/health
+
+# One-shot coding-agent benchmark (30 turns, 20K-token prefix):
+python3 scripts/bench/bench_agent_trace.py 30 20000
+```
+
+The health endpoint returns JSON including engine status. For the full benchmark
+suite and the expected baselines, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+The same flow is also available as an executable Jupyter notebook:
+[`notebooks/mi308x_deploy_bench.ipynb`](notebooks/mi308x_deploy_bench.ipynb).
 
 ## CPU-instance preparation
 
@@ -232,6 +257,25 @@ MAX_BATCHED_TOKENS=4096 bash scripts/02_serve_vllm.sh dsflash
 The default is the measured **3072 coding-agent latency profile**. 4096 remains
 an explicit throughput profile; 2048 was rejected because it slowed the long
 prefill more while giving unstable isolation results.
+
+## Environment variables
+
+All instance-specific paths are overridable. The defaults below are the values
+used in this repository's reference sandbox; point them at your own layout.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MODEL_BASE` | `/mnt/workspace/models` | checkpoint directory (48 shards) |
+| `HOT_MODEL_BASE` | `/root/models` | optional local-SSD hot copy |
+| `WHEELS` | `/mnt/workspace/wheels` | pinned vLLM/AITER/flydsl wheels |
+| `PATCH_REPO` | `/mnt/workspace/deepseek-v4-flash-mi300x` | pinned patch-source checkout |
+| `PERSIST_DIR` | `/mnt/workspace/.venvs` | venv/JIT/AITER snapshots |
+| `VLLM_VENV` | `/root/.venvs/vllm` | active serving venv |
+| `VLLM_API_KEY` / `VLLM_API_KEY_FILE` | *(unset)* | optional serving/client auth |
+| `VLLM_BASE_URL` | `http://127.0.0.1:8000` | benchmark client endpoint |
+
+The scheduler/decoder A/B knobs are listed under "A/B without editing the
+launcher" above.
 
 ## Coding-agent benchmark suite
 
