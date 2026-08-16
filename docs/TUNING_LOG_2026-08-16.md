@@ -535,25 +535,40 @@ The next useful work is above the already-promoted GEMM layer:
    real workload proves that they recur;
 4. keep tool/parser, 500K, cache and restart gates mandatory for every candidate.
 
-### 18.1 Where the ~1.3s actually goes (Prometheus diagnosis, 2026-08-16)
+### 18.1 Where the ~1.3s actually goes (scheduler trace, 2026-08-16)
 
-A metric-instrumented isolation run (reproduced median added short TTFT
-+1.28s, +1.27/+1.28/+1.31) resolves the open question in item 1. Scraping
-`/metrics` before/after a single 200K cold round:
+A per-step scheduler trace (temporary `SCHEDTRACE` instrumentation, reproduced
+added short TTFT +1.31s) resolves the open question in item 1 with direct
+evidence. The steady-state (post-warm-up) timeline:
 
-- `request_queue_time_seconds` stays ~7ms (the short request is scheduled
-  almost immediately, so the penalty is **not** queue/waiting time);
-- `request_inference_time_seconds` absorbs the delay — the short request's
-  first token lands after the batch it was merged into finishes executing;
-- `iteration_tokens_total` shows the cold prefill being dispatched as large
-  multi-thousand-token iterations, not as the 1,024-token contended chunks.
+- a solo long-prefill chunk is **2,688 tokens** (3,072 minus DSpark K7's 384
+  reservation) and executes in **~0.73s** per step;
+- the moment the short request is admitted, the long prefill drops to 1,024-token
+  chunks and the short request is scheduled in the **same step** as the long
+  chunk (so admission/interleaving works as intended);
+- the short request's penalty is dominated by **queue wait for the in-flight
+  2,688-token chunk to finish** (~0.7s), plus its own batched prefill/decode
+  (~0.4s), plus a small contention residue.
 
-Conclusion: the fix belongs in the already-dispatched iteration's execution
-granularity (how a newly admitted short request's decode interleaves with an
-in-flight large prefill batch), not in the scheduler admission path and not in
-more GEMM rows. The always-1,024-cap experiment in §15.1 was rejected because
-it slows the solo prefill and still does not isolate the short request; the
-next lever is profiling the batch execution/attention step itself.
+Correction to the earlier Prometheus reading: `request_queue_time_seconds` /
+`request_inference_time_seconds` are only emitted for non-streaming finished
+requests, so they silently exclude this benchmark's streaming requests and the
+previous "~7ms queue time" conclusion was a measurement artifact. The
+`iteration_tokens_total` histogram counts per-step computed tokens and does not
+contradict the 2,688-token chunk assertion in the scheduler.
+
+Note on restart contamination: the *first* 2,688-token prefill chunk after a
+vLLM restart can take ~3.0s (inference-time JIT/capture), so an isolation run
+immediately after restart reports a much larger penalty than steady state. The
+warm-up (`warmup_runtime.sh`) mitigates this, but a restart re-introduces a
+first-prefill tax.
+
+Conclusion: the fix belongs in the **in-flight chunk granularity** — a late
+short request waits ~0.7s for a 2,688-token chunk it cannot interrupt. Reducing
+the solo chunk size shortens that wait but raises total prefill time (the
+always-1,024-cap experiment in §15.1 regressed to +3.08s). The next levers are
+adaptive chunk sizing (small chunks early / near the interactive window) or
+preempting the in-flight prefill chunk; more GEMM rows are irrelevant here.
 
 ## 19. Promotion policy used in this session
 
