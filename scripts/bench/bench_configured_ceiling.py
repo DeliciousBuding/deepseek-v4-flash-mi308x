@@ -20,6 +20,10 @@ from bench_agent_trace import SYSTEM_PROMPT, chat_stream, make_repo_context
 
 
 DEFAULT_PROMPT_TOKEN_TARGETS = (8_000, 32_000, 100_000)
+# ``make_repo_context`` intentionally uses a cheap character-based estimate.
+# This model's tokenizer measures that fixture about 1.4x larger, so compensate
+# here while still reporting the authoritative response-level prompt count.
+REPO_CONTEXT_TARGET_SCALE = 0.70
 
 
 @dataclass(frozen=True)
@@ -97,9 +101,12 @@ def measure_prompt(
     target_prompt_tokens: int,
     output_tokens: int,
 ) -> PromptSample:
+    estimated_repo_context_tokens = round(
+        target_prompt_tokens * REPO_CONTEXT_TARGET_SCALE
+    )
     prompt = (
         SYSTEM_PROMPT
-        + make_repo_context(target_prompt_tokens)
+        + make_repo_context(estimated_repo_context_tokens)
         + "\nReview the repository context and identify one concurrency risk."
     )
     cache_salt = f"configured-ceiling-{uuid.uuid4().hex}"
