@@ -284,6 +284,16 @@ needle/retrieval fixtures at ~100K / 256K / 384K / 475K and verify exact recall
 of multiple separated values. Run both native and K7 for at least the longest
 case.
 
+```bash
+python3 scripts/bench/bench_long_context_recall.py \
+  --target-tokens 100000 256000 384000 475000 \
+  --needles 5
+```
+
+The harness uses `/tokenize` to calibrate document size, places random exact
+values throughout the document, forces a cold cache with a first-block nonce and
+unique cache salt, and accepts only the ordered JSON array in final content.
+
 This follows the upstream production discipline: its current correctness report
 promotes long-context recall and tool rounds alongside throughput, not after it.
 
