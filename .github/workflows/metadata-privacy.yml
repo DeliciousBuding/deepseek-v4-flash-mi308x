@@ -9,8 +9,8 @@ permissions:
 
 jobs:
   sanitize:
-    # The force-push performed below triggers another push event. Skip that
-    # bot-authored event so this workflow cannot loop.
+    # A force-push performed with GITHUB_TOKEN normally does not fan out into
+    # another workflow run, but keep this guard as a second loop breaker.
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -18,50 +18,59 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check whether history needs metadata sanitization
+      - name: Check maintainer metadata
         id: check
         shell: bash
         run: |
           set -euo pipefail
           noreply='101502465+DeliciousBuding@users.noreply.github.com'
           bad=0
-          while IFS= read -r email; do
-            [ -z "$email" ] && continue
-            if [ "$email" != "$noreply" ]; then
+          while IFS='|' read -r an ae cn ce; do
+            if { [ "$an" = 'Delicious233' ] && [ "$ae" != "$noreply" ]; } || \
+               { [ "$cn" = 'Delicious233' ] && [ "$ce" != "$noreply" ]; }; then
               bad=1
               break
             fi
-          done < <(git log main --format='%ae%n%ce')
+          done < <(git log main --format='%an|%ae|%cn|%ce')
           echo "needed=$bad" >> "$GITHUB_OUTPUT"
 
-      - name: Rewrite public commit metadata to GitHub noreply
+      - name: Rewrite only maintainer email metadata to GitHub noreply
         if: steps.check.outputs.needed == '1'
         shell: bash
         env:
           FILTER_BRANCH_SQUELCH_WARNING: '1'
         run: |
           set -euo pipefail
-          noreply='101502465+DeliciousBuding@users.noreply.github.com'
 
-          # Preserve names, dates, trees and messages; only normalize author /
-          # committer email metadata. This repository is deliberately a
-          # single-maintainer public recipe, so one noreply identity is the
-          # desired public-history policy.
+          # Preserve contributor identities. Only commits authored/committed as
+          # this repository's maintainer identity are normalized to the public
+          # GitHub noreply address. Trees, dates and messages are unchanged.
           git filter-branch -f \
             --env-filter '
-              GIT_AUTHOR_EMAIL="101502465+DeliciousBuding@users.noreply.github.com"
-              GIT_COMMITTER_EMAIL="101502465+DeliciousBuding@users.noreply.github.com"
+              if [ "$GIT_AUTHOR_NAME" = "Delicious233" ]; then
+                GIT_AUTHOR_EMAIL="101502465+DeliciousBuding@users.noreply.github.com"
+              fi
+              if [ "$GIT_COMMITTER_NAME" = "Delicious233" ]; then
+                GIT_COMMITTER_EMAIL="101502465+DeliciousBuding@users.noreply.github.com"
+              fi
               export GIT_AUTHOR_EMAIL GIT_COMMITTER_EMAIL
             ' \
-            --msg-filter 'sed "/^Co-authored-by: Cursor /d"' \
             -- main
 
           git push --force origin HEAD:main
 
-      - name: Verify sanitized history
+      - name: Verify maintainer metadata
         if: steps.check.outputs.needed == '1'
         shell: bash
         run: |
           set -euo pipefail
           noreply='101502465+DeliciousBuding@users.noreply.github.com'
-          test -z "$(git log main --format='%ae%n%ce' | grep -v -F "$noreply" | sed '/^$/d')"
+          bad=0
+          while IFS='|' read -r an ae cn ce; do
+            if { [ "$an" = 'Delicious233' ] && [ "$ae" != "$noreply" ]; } || \
+               { [ "$cn" = 'Delicious233' ] && [ "$ce" != "$noreply" ]; }; then
+              bad=1
+              break
+            fi
+          done < <(git log main --format='%an|%ae|%cn|%ce')
+          test "$bad" -eq 0
