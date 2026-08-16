@@ -16,9 +16,6 @@ import re
 import time
 import urllib.request
 
-KEY = os.environ.get("VLLM_API_KEY") or open(
-    os.environ.get("VLLM_API_KEY_FILE", "/mnt/workspace/.bootstrap/vllm_api_key")
-).read().strip()
 BASE = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000")
 MODEL = os.environ.get("VLLM_MODEL", "deepseek-v4-flash")
 
@@ -44,6 +41,25 @@ REPO_UNIT = (
     "with per-entry TTL and single-flight refresh. File handler/auth.go: "
     "OIDC token verification with clock-skew tolerance. "
 )
+
+
+def api_key() -> str:
+    """Resolve credentials only when a request is actually sent.
+
+    Keeping this lazy makes imports and ``--help`` safe on CI/developer hosts
+    that intentionally do not have the private DSW key file.
+    """
+    value = os.environ.get("VLLM_API_KEY")
+    if value:
+        return value
+    path = os.environ.get("VLLM_API_KEY_FILE", "/mnt/workspace/.bootstrap/vllm_api_key")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "No API key configured; set VLLM_API_KEY or VLLM_API_KEY_FILE"
+        ) from exc
 
 
 def make_repo_context(target_tokens: int) -> str:
@@ -81,7 +97,7 @@ def chat_stream(messages, max_tokens=256, temperature=0.0, salt=None):
     req = urllib.request.Request(
         BASE + "/v1/chat/completions",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + KEY},
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key()},
     )
 
     t0 = time.perf_counter()
@@ -133,11 +149,7 @@ def chat_stream(messages, max_tokens=256, temperature=0.0, salt=None):
 
 
 def history_answer(result: dict, include_reasoning: bool, turn: int) -> str:
-    """Model what an upstream harness re-submits on the next turn.
-
-    Default is content-only: hidden/reasoning output is not echoed back into the
-    prompt. --include-reasoning-history explicitly tests clients that do replay it.
-    """
+    """Model what an upstream harness re-submits on the next turn."""
     if include_reasoning:
         text = "\n".join(x for x in (result["reasoning"], result["content"]) if x).strip()
     else:
