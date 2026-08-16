@@ -7,11 +7,6 @@ Exercises:
 Supports forced/required/auto tool selection, long stable prefixes, and
 concurrent independent rounds. This directly targets parser failures that only
 appear under long context or concurrent streaming load.
-
-Examples:
-  python3 scripts/bench/bench_tool_roundtrip.py --rounds 10
-  python3 scripts/bench/bench_tool_roundtrip.py --mode auto --prefix-tokens 100000
-  python3 scripts/bench/bench_tool_roundtrip.py --mode auto --prefix-tokens 100000 --concurrency 4 --rounds 16
 """
 from __future__ import annotations
 
@@ -26,9 +21,6 @@ import urllib.request
 
 BASE = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000")
 MODEL = os.environ.get("VLLM_MODEL", "deepseek-v4-flash")
-KEY = os.environ.get("VLLM_API_KEY") or open(
-    os.environ.get("VLLM_API_KEY_FILE", "/mnt/workspace/.bootstrap/vllm_api_key")
-).read().strip()
 
 TOOLS = [{
     "type": "function",
@@ -50,6 +42,20 @@ REPO_UNIT = (
     "OIDC tokens and refreshes JWKS through a single-flight cache. "
 )
 DSML_HINTS = ("DSML", "invoke name=", "tool_calls>", "parameter name=")
+
+
+def api_key() -> str:
+    value = os.environ.get("VLLM_API_KEY")
+    if value:
+        return value
+    path = os.environ.get("VLLM_API_KEY_FILE", "/mnt/workspace/.bootstrap/vllm_api_key")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "No API key configured; set VLLM_API_KEY or VLLM_API_KEY_FILE"
+        ) from exc
 
 
 def stable_system(prefix_tokens: int) -> str:
@@ -87,7 +93,7 @@ def stream_chat(body: dict) -> StreamResult:
     req = urllib.request.Request(
         BASE + "/v1/chat/completions",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + KEY},
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key()},
     )
 
     t0 = time.perf_counter()
@@ -157,9 +163,7 @@ def cache_text(r: StreamResult) -> str:
 
 
 def tool_choice(mode: str):
-    if mode == "forced":
-        return FORCED_TOOL
-    return mode
+    return FORCED_TOOL if mode == "forced" else mode
 
 
 def validate_tool_call(r: StreamResult) -> tuple[bool, str]:
