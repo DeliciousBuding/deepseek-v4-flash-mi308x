@@ -535,6 +535,26 @@ The next useful work is above the already-promoted GEMM layer:
    real workload proves that they recur;
 4. keep tool/parser, 500K, cache and restart gates mandatory for every candidate.
 
+### 18.1 Where the ~1.3s actually goes (Prometheus diagnosis, 2026-08-16)
+
+A metric-instrumented isolation run (reproduced median added short TTFT
++1.28s, +1.27/+1.28/+1.31) resolves the open question in item 1. Scraping
+`/metrics` before/after a single 200K cold round:
+
+- `request_queue_time_seconds` stays ~7ms (the short request is scheduled
+  almost immediately, so the penalty is **not** queue/waiting time);
+- `request_inference_time_seconds` absorbs the delay — the short request's
+  first token lands after the batch it was merged into finishes executing;
+- `iteration_tokens_total` shows the cold prefill being dispatched as large
+  multi-thousand-token iterations, not as the 1,024-token contended chunks.
+
+Conclusion: the fix belongs in the already-dispatched iteration's execution
+granularity (how a newly admitted short request's decode interleaves with an
+in-flight large prefill batch), not in the scheduler admission path and not in
+more GEMM rows. The always-1,024-cap experiment in §15.1 was rejected because
+it slows the solo prefill and still does not isolate the short request; the
+next lever is profiling the batch execution/attention step itself.
+
 ## 19. Promotion policy used in this session
 
 A tuning row or runtime change was promoted only if the relevant checks passed:
