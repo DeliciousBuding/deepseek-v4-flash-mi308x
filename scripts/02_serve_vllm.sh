@@ -45,6 +45,7 @@ if [ -z "${VLLM_API_KEY:-}" ]; then
     echo "generated API key and persisted it to $KEY_FILE"
   fi
 fi
+export VLLM_API_KEY
 
 if [ "$MODEL_KEY" = "qwen38" ]; then
   MODEL_PATH="$MODEL_BASE/Qwen/Qwen3.8-27B"
@@ -60,7 +61,6 @@ if [ "$MODEL_KEY" = "qwen38" ]; then
     --enable-auto-tool-choice \
     --speculative-config '{"method":"mtp","num_speculative_tokens":4}' \
     --gpu-memory-utilization 0.92 \
-    --api-key "$VLLM_API_KEY" \
     --host "$HOST" --port "$PORT"
 
 elif [ "$MODEL_KEY" = "qwen36" ]; then
@@ -78,7 +78,6 @@ elif [ "$MODEL_KEY" = "qwen36" ]; then
     --enable-auto-tool-choice \
     --speculative-config '{"method":"mtp","num_speculative_tokens":2}' \
     --gpu-memory-utilization 0.92 \
-    --api-key "$VLLM_API_KEY" \
     --host "$HOST" --port "$PORT"
 
 elif [ "$MODEL_KEY" = "dsflash" ]; then
@@ -179,7 +178,6 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
     "${SPEC_ARGS[@]}" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     "${EXTRA_ARGS[@]}" \
-    --api-key "$VLLM_API_KEY" \
     --host "$HOST" --port "$PORT"
 
   # Validated production defaults (2026-08-16):
