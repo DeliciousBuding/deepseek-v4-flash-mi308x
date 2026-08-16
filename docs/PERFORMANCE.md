@@ -19,12 +19,13 @@ patch source:
   012b9945c1e61ec7a7c7de12da58e8c7cafd92ab
 ```
 
-The validated stack is the historical upstream overlay set at that exact commit,
-plus the local sandbox compatibility patch
-`patches/shared_offload_region.madvise-tolerant.py`. It is **not** byte-equivalent
-to the current ryanzhou production main, which pins another vLLM nightly and a
-changed overlay/kernel set. `scripts/prepare_patch_repo.sh` and
-`scripts/audit_runtime.py` make this distinction explicit and prevent silent drift.
+As of 2026-08-16 that exact patch-source commit is also the current ryanzhou
+`main` commit. The local serving runtime is nevertheless **not byte-equivalent**
+to upstream production: upstream applies the overlays to vLLM `dev229`, while
+this recipe ports them onto `dev306`, adds the small `activation=None` signature
+compatibility edit required by the newer caller, and adds the local sandbox
+`shared_offload_region.madvise-tolerant.py` patch. The full upstream SHA is still
+pinned so a future branch move cannot silently change a reproducible install.
 
 ## Stable serve profile (v2)
 
@@ -98,10 +99,11 @@ clients. Immediately before the last disconnect, the agent trace was re-run usin
 each response's `usage.prompt_tokens_details.cached_tokens`: **856K / 860K prompt
 tokens cached = 99.4%**, with hot TTFT around **0.21 s** in that run.
 
-`scripts/bench/bench_agent_trace.py` now treats per-request `cached_tokens` as
-authoritative and prints global counters only as diagnostics. It also retains the
-model's actual reply in the growing conversation rather than a synthetic reply, so
-the next GPU run must re-establish the headline figure with the updated harness.
+`scripts/bench/bench_agent_trace.py` now makes per-request `cached_tokens` the
+authoritative metric. The updated harness also defaults to **not** replaying
+`reasoning_content` into the next prompt, which better models harnesses that keep
+hidden reasoning out of conversation history; `--include-reasoning-history`
+provides the explicit comparison mode.
 
 Historical coding-agent points:
 
@@ -113,14 +115,15 @@ Historical coding-agent points:
 | earlier 30-turn average decode | ~119 tok/s |
 | streaming tool-call survival | **10/10** before disconnect |
 
-The repository now contains a dedicated
-`scripts/bench/bench_tool_roundtrip.py` to reproduce the full streamed
-assistant-tool-call -> tool-result -> assistant round trip, including fragmented
-`delta.tool_calls`, JSON arguments and semantic TTFT.
+The repository now contains:
 
-`scripts/bench/bench_session_concurrency.py` adds several independent long-lived
-agent histories with tool/IO idle windows, which is more representative than a
-one-shot text-generation concurrency sweep for cache retention and tail TTFT.
+- `bench_agent_trace.py` — one growing agent session;
+- `bench_session_concurrency.py` — independent long-lived sessions with idle/tool windows;
+- `bench_tool_roundtrip.py` — actual assistant tool call -> role=tool -> final answer,
+  with forced/required/auto modes, long prefix and concurrent parser stress.
+
+Synthetic performance traces do not forge `role=tool` messages without a matching
+assistant tool-call ID.
 
 ## Local TTFT isolation
 
@@ -151,9 +154,9 @@ A separate agent run measured roughly ~142 tok/s pure decode after TTFT.
 
 ## Current upstream reference (2026-08-16)
 
-The current public `ryanzhou/deepseek-v4-flash-mi300x` README reports its pinned
-MI300X production stack as vLLM
-`0.26.1rc1.dev229+g124154a88.rocm723` + AITER 0.1.19, with:
+Current ryanzhou `main` is commit
+`012b9945c1e61ec7a7c7de12da58e8c7cafd92ab`. Its README reports a production
+runtime based on vLLM `0.26.1rc1.dev229+g124154a88.rocm723` + AITER 0.1.19:
 
 | Metric | Current public upstream result |
 |---|---:|
@@ -163,12 +166,11 @@ MI300X production stack as vLLM
 | C64 burst | 1,278 tok/s aggregate (K7) |
 | context | **384K validated** (architecture supports 1M) |
 | GPU KV | 16 GB fp8_ds_mla + 96 GiB native CPU tier |
-| scheduler | 4,096-token budget; 384 reserved for DSpark, up to 3,712 ordinary prefill |
+| scheduler | 4,096-token budget; 384 reserved for speculative work, up to 3,712 ordinary prefill |
 
-These are comparison points, not a command to copy current upstream main into the
-validated venv. Our environment has a 16 GB `/dev/shm` sandbox limit, a required
-~500K context window, and a different pinned runtime. Any migration must happen in
-a second venv and pass correctness first.
+The same source overlays can behave differently because the runtime base differs.
+Our project also has a 16 GB `/dev/shm` sandbox constraint, only a 12 GB CPU-KV
+tier, and a required ~500K context ceiling.
 
 ## Tuning history
 
@@ -197,18 +199,21 @@ C4 177 -> 286, C8 372 -> 446, repeated-prefix speedup ~14x -> 17.5x.
 | DSpark K=5 vs K=7 | 121.7 vs 133.5 tok/s at decode-512 | keep K=7 for C1 latency |
 | AITER M=1/2 source tuning | tuning harness absent from shipped wheel | defer to separate source/CK environment |
 
-Do not repeat the two graph experiments without changing the runtime/kernel stack.
+Do not repeat the two graph experiments without changing the runtime base or
+kernel stack.
 
 ## Next GPU run
 
 The ordered matrix is in [`GPU_VALIDATION_PLAN.md`](GPU_VALIDATION_PLAN.md):
 
-1. runtime/patch audit and default-profile regression;
-2. scheduler budget 2048/3072/4096/8192 A/B;
-3. static DSpark K7 vs native decode at C1/C2/C4/C8, with acceptance metrics;
-4. 256K/384K/512K configured-bound overhead check on identical short prompts;
-5. 12 GB CPU-KV vs GPU-only under 500K + multi-session agent pressure;
-6. only then, a **separate** venv experiment against current upstream main.
+1. runtime/patch audit and default-profile correctness regression;
+2. short/100K/200K + concurrent streaming tool parser gates;
+3. reasoning-history policy comparison;
+4. scheduler budget 2048/3072/4096/8192 A/B;
+5. static DSpark K7 vs native decode at C1/C2/C4/C8, with acceptance metrics;
+6. DSpark x CPU-KV prefix-cache matrix;
+7. 256K/384K/512K configured-bound overhead check;
+8. long-context recall, then a separate dev229-runtime experiment if useful.
 
 The winning configuration is the one that improves a complete multi-turn coding
 agent session while preserving 500K correctness, streaming tool calls, cache
