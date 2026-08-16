@@ -17,8 +17,8 @@ jobs:
           scandir: "./scripts"
           severity: warning
 
-  python-syntax:
-    name: Python syntax
+  python:
+    name: Python syntax + CLI smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +27,11 @@ jobs:
           python-version: "3.12"
       - name: Compile check
         run: python -m compileall -q scripts/
+      - name: Benchmark CLI imports
+        run: |
+          python scripts/bench/bench_agent_trace.py --help >/dev/null
+          python scripts/bench/bench_session_concurrency.py --help >/dev/null
+          python scripts/bench/bench_tool_roundtrip.py --help >/dev/null
 
   markdown-lint:
     name: Markdown lint
