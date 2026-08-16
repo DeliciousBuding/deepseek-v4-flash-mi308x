@@ -2,104 +2,169 @@
 
 <div align="center">
 
-**Serving DeepSeek-V4-Flash-0731 on a single AMD Instinct MI300X/MI308X (192 GB) with vLLM on ROCm — no Docker, 512K context, production tuning included.**
+**DeepSeek-V4-Flash-0731 on a single AMD Instinct MI300X / MI308X (gfx942), served with native vLLM on ROCm.**
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![ROCm](https://img.shields.io/badge/ROCm-7.2-red)](https://www.amd.com/en/products/software/rocm.html)
-[![vLLM](https://img.shields.io/badge/vLLM-nightly%20cb8104839-2b6fb3)](https://github.com/vllm-project/vllm)
-[![GPU](https://img.shields.io/badge/GPU-MI300X%20%7C%20MI308X-ED1C24)]()
+512K configured context · 500K validated · DSpark · prefix caching · native CPU-KV tier · coding-agent benchmarks · no Docker required
+
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![ROCm](https://img.shields.io/badge/ROCm-7.2-red)](https://rocm.docs.amd.com/)
+[![vLLM](https://img.shields.io/badge/vLLM-dev306-4B32C3)](https://github.com/vllm-project/vllm)
+[![GPU](https://img.shields.io/badge/GPU-gfx942%20%7C%20192GB-ED1C24)]()
 
 </div>
 
-This repository is a **production recipe** for running DeepSeek-V4-Flash-0731 — a 284B-parameter MoE model (13B active) — on a **single AMD Instinct accelerator** via native vLLM on ROCm. It packages the environment setup, kernel patch stack, launch configuration, and benchmark harness that we use to serve a long-context coding-agent API with an OpenAI-compatible endpoint.
+This repository is a **reproducible serving recipe and benchmark harness** for
+running `deepseek-ai/DeepSeek-V4-Flash-0731` on one 192 GB-class gfx942 GPU.
+The primary workload is not a one-shot chatbot: it is a **long-lived coding
+agent** with a large stable prefix, growing multi-turn history, tool calls, and
+mixed cold/hot requests.
 
-> **Why it exists**: upstream vLLM does not run DeepSeek-V4-Flash stably on gfx942. Sparse-attention `topk_indices` intermittently returns empty sets (vLLM issue #52109), crashing long generations and long prefills. The patch stack in this repo fixes the crash and unlocks the full performance headroom (DSpark speculative decoding, tuned AITER GEMM tables, fused MXFP4 kernels).
+The project intentionally pins the runtime and the historical upstream patch
+source that produced the validated MI308X baseline. Current upstream development
+is tracked and compared, but it is never silently mixed into the stable venv.
 
-## Highlights
+## What is validated
 
-- **Single GPU, 284B MoE.** DeepSeek-V4-Flash-0731 fits a 192 GB MI300X/MI308X with the official FP4/FP8 checkpoint (~156 GB on disk, ~170-175 GB at runtime).
-- **512K context, verified.** 50K → 500K prompt ladder passes without crashes or OOM (see [docs/PERFORMANCE.md](docs/PERFORMANCE.md)).
-- **~133 tok/s single-stream decode** (incl. TTFT) with DSpark-7 speculative decoding; up to 446 tok/s aggregate at C8.
-- **0.32s hot TTFT** on a 30K-token stable agent prefix (34x vs cold) — per-turn agent latency is decode-bound.
-- **+0.04s TTFT isolation**: a short request mid-way through a 200K prefill gets its first token in 1.96s vs 1.91s alone.
-- **17.5x prefix-cache speedup** on repeated long prefixes (cold 8.7s → hot 0.5s).
-- **CPU KV offload**: pinned 16 GB GPU KV pool + native CPU layer (12 GB on this sandbox; upstream uses 96 GB on bare metal).
-- **No Docker.** Native `vllm serve` in an isolated venv that reuses the system ROCm torch.
-- **One-command install** of nightly vLLM + AITER + an 18-patch kernel stack, idempotent and re-runnable.
-- Also serves **Qwen3.8-27B** and **Qwen3.6-35B-A3B** as fallback models with day-0 AMD support.
+Measured on the local MI308X profile documented in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md):
 
-## Requirements
+| Metric | Local result |
+|---|---:|
+| Configured context ceiling | **524,288 tokens** |
+| Long-context ladder | **50K / 128K / 256K / 384K / 500K all pass** |
+| 512-token single-stream generation, incl. TTFT | **133.5 tok/s** |
+| C1 / C2 / C4 / C8 aggregate | **128 / 197 / 286 / 446 tok/s** |
+| Repeated-prefix latency | **8.67s -> 0.49s (17.5x)** |
+| Last per-request cached-token trace | **99.4% (856K / 860K prompt tokens)** |
+| Hot coding-agent TTFT | **~0.21–0.32s** across trace revisions / warm states |
+| Short request during 200K prefill | **+0.04s TTFT overhead** |
+| Streaming tool-call validation before last disconnect | **10/10 round trips** |
 
-| Component | Version | Notes |
-|---|---|---|
-| GPU | AMD Instinct MI300X or MI308X (gfx942) | 192 GB HBM3 |
-| ROCm | 7.2.x | system-installed |
-| Python | 3.12 | system python untouched |
-| torch | 2.11.0+gitd0c8b1f (ROCm build) | reused from system; **never replaced** |
-| vLLM | `0.26.1rc1.dev306+gcb8104839.rocm723` | nightly wheel, pinned |
-| AITER | 0.1.19 | `manylinux_2_34` wheel required |
-| flydsl | >= 0.2.4 | runtime dependency of AITER 0.1.19 (long-prefix path) |
+Those values are **local measurements**, not copied community numbers. The next
+GPU session re-runs the full regression suite with the updated benchmark harness
+before any runtime migration.
+
+## Stable runtime
+
+```text
+GPU        MI308X / MI300X class, gfx942, 192 GB
+ROCm       7.2.3
+Python     3.12
+Torch      2.11.0+gitd0c8b1f (platform ROCm build, reused)
+vLLM       0.26.1rc1.dev306+gcb8104839.rocm723
+AITER      0.1.19
+flydsl     0.2.4
+patch src  ryanzhou/deepseek-v4-flash-mi300x
+           012b9945c1e61ec7a7c7de12da58e8c7cafd92ab
+```
+
+The stable profile uses the historical upstream overlay set at that exact
+commit, plus one local sandbox compatibility overlay. It is **not** equivalent
+to the current public ryanzhou production main, which pins another vLLM nightly
+and a changed kernel/overlay set. Any upstream migration is therefore tested in
+a second environment rather than overwriting the known-good runtime.
+
+## Why the extra work is necessary on gfx942
+
+DeepSeek-V4-Flash combines sparse MLA, MXFP4 experts, FP8/FNUZ-sensitive paths,
+DeepSeek-specific speculative decoding, and unusual long-context cache behavior.
+The validated gfx942 stack includes fixes/tuning for deterministic sparse top-k,
+ROCm DSpark verification, expert routing / SwiGLU behavior, sparse prefill,
+AITER GEMM shapes, block-table overhead, and native CPU-KV synchronization.
+
+The public production work by
+[ryanzhou/deepseek-v4-flash-mi300x](https://github.com/ryanzhou/deepseek-v4-flash-mi300x)
+is the main upstream reference for this recipe; this repository ports the
+validated historical stack to a **native, Docker-less venv deployment** and adds
+sandbox recovery, long-context, coding-agent, cache and protocol validation.
 
 ## Quick start
 
+### 1. Clone and prepare the exact patch source
+
 ```bash
-# 1. Create the isolated environment (reuses system torch)
+git clone https://github.com/DeliciousBuding/vllm-rocm-dsv4-flash.git
+cd vllm-rocm-dsv4-flash
+bash scripts/prepare_patch_repo.sh
+```
+
+`prepare_patch_repo.sh` fetches and checks out the exact historical upstream
+commit used by the stable profile. It does not follow upstream `main`.
+
+### 2. Create the isolated venv
+
+```bash
 bash scripts/env_setup.sh
+```
 
-# 2. Install nightly vLLM + AITER 0.1.19 + the 18-patch kernel stack (idempotent)
+The venv uses `--system-site-packages` so the platform ROCm Torch build is reused
+rather than replaced. System Python/Torch remain untouched.
+
+### 3. Install the pinned runtime
+
+Place the pinned vLLM, AITER and flydsl wheels in `${WHEELS:-/mnt/workspace/wheels}`,
+then run:
+
+```bash
 bash scripts/install_vllm_nightly.sh
+```
 
-# 3. Download weights (idempotent, resumable)
-bash scripts/01_download_model.sh dsflash    # ~156 GB official FP4/FP8
+The installer refuses to continue if the external patch checkout is not at the
+expected full commit SHA. It applies the overlays, validates artifacts, and
+persists the venv/AITER cache snapshots for restart recovery.
 
-# 4. Serve (OpenAI-compatible /v1/chat/completions)
+### 4. Download the model
+
+```bash
+bash scripts/01_download_model.sh dsflash
+```
+
+The serve path checks for all 48 weight shards before launch.
+
+### 5. Audit and serve
+
+```bash
+python3 scripts/audit_runtime.py
 bash scripts/02_serve_vllm.sh dsflash
 ```
 
-Sanity check:
+`audit_runtime.py` verifies versions, external patch provenance, installed
+overlays, the patched C++ extension, sparse-prefill artifact and persistent
+restart snapshots.
+
+## CPU-instance preparation before paying for GPU time
+
+For environments where persistent storage is shared between CPU and GPU
+instances, run:
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $VLLM_API_KEY" \
-  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}'
+bash scripts/preflight_cpu.sh
 ```
 
-## Models
+The CPU preflight performs every useful non-GPU check first:
 
-| Key | Model | Size | Notes |
-|---|---|---|---|
-| `dsflash` | [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) | 284B / 13B active, ~156 GB | **primary**. Official FP4/FP8, only official checkpoint that fits 192 GB. |
-| `qwen38` | [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) | 27B dense, ~56 GB | fallback. Day-0 AMD support, 262K context. |
-| `qwen36` | [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) | 35B / 3B active, ~70 GB | fallback. Agentic-coding specialist (Gated DeltaNet + MoE). |
+- shell and Python benchmark syntax;
+- exact historical patch checkout;
+- all 48 model shards and metadata;
+- exact vLLM/AITER/flydsl wheel inventory + ZIP integrity;
+- venv / AITER / JIT persistent tarball readability;
+- persistent-disk headroom.
 
-## The patch stack
+A failed CPU preflight is a storage/source problem and should be fixed before
+switching to a GPU instance.
 
-Upstream vLLM 0.26.0 crashes on gfx942 for DeepSeek-V4-Flash (empty `topk_indices` in sparse attention) and runs unoptimized. `install_vllm_nightly.sh` installs nightly `cb8104839` and applies a 17-file patch overlay ported from the community production stack at [ryanzhou/deepseek-v4-flash-mi300x](https://github.com/ryanzhou/deepseek-v4-flash-mi300x), plus our own environment patches in [`patches/`](patches/) (applied first when names collide):
+## Production launch profile
 
-| Category | Patches | Effect |
-|---|---|---|
-| **Crash fix** | `_C_stable_libtorch.topk-tiebreak-sanitize.abi3.so` | prebuilt C++ extension fixing empty-topk crash (root cause: FLAT-write / SHUFFLE-read mismatch in the indexer K-cache) |
-| **Speculative decoding** | `dspark-speculator.*`, `rocm_aiter_mla.dspark-causal`, `spec-decode-utils.*` | DSpark-7: probabilistic drafting + block rejection, ~1.75x vs MTP |
-| **MLA sparse attention** | `rocm_aiter_mla_sparse.decode-h32-k16`, `fused_compress_quant_cache.fnuz-shuffle` | gfx942 sparse MLA decode, causal verification |
-| **MoE / GEMM** | `mxfp4.fused-silu` (+64% decode), `activation.rocm-exact-swiglu`, `gpt_oss_triton_kernels_moe.row-i8asym-candidate` | fused SiLU, exact BF16 SwiGLU, custom INT8 MoE kernel |
-| **KV / cache** | `cache_utils.gather2048`, `block_table.active-width-copy`, `kv_offload_cpu_gpu_worker.load-war` | 2048-token gather, active-width block copy |
-| **Tuning tables** | AITER A8W8 GEMM CSVs (decode + blockscale-bpreshuffle) | per-shape tuned GEMM configs |
-| **Sandbox fix (ours)** | `shared_offload_region.madvise-tolerant.py` | degrade MADV_POPULATE_WRITE EINVAL (Kata/tmpfs) to demand paging |
+The stable `dsflash` defaults are:
 
-Every patch is a byte-for-byte file overlay into the venv site-packages; no source rebuild is required. The kernel source is staged to `/opt/cj-moe` for runtime JIT of AITER/triton kernels.
-
-## Launch configuration (dsflash)
-
-The serve script pins the production configuration we validated on MI308X:
-
-```
---kv-cache-dtype fp8_ds_mla        # MLA-compressed KV
---block-size 256                   # prefix-cache granularity
---enable-prefix-caching            # agent workload: stable prompts hit cache
---max-model-len 524288             # 512K context
---kv-cache-memory-bytes 16G        # pinned GPU KV pool
---kv-offloading-size 12G           # CPU KV layer (native backend)
+```text
+--max-model-len 524288
+--kv-cache-dtype fp8_ds_mla
+--block-size 256
+--enable-prefix-caching
+--kv-cache-memory-bytes 16000000000
+--kv-offloading-size 12
+--kv-offloading-backend native
 --max-num-seqs 64
 --max-num-batched-tokens 4096
 --long-prefill-token-threshold 1024
@@ -110,106 +175,178 @@ The serve script pins the production configuration we validated on MI308X:
 --tool-call-parser deepseek_v4
 --enable-auto-tool-choice
 --enable-prompt-tokens-details
---speculative-config '{"method":"dspark","num_speculative_tokens":7,
-  "draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
+DSpark: K=7, probabilistic drafting, block rejection
 --gpu-memory-utilization 0.95
 ```
 
-Notes:
+The 12 GB CPU-KV tier is a **host constraint**, not a general recommendation:
+the validated sandbox exposes only a 16 GB `/dev/shm`. Bare-metal systems may
+support a much larger native CPU tier.
 
-- DSpark is the DeepSeek-specific speculative method — **not MTP** (`method=mtp` raises KeyError on this checkpoint).
-- CPU KV offload requires the GPU pool to be **pinned** via `--kv-cache-memory-bytes`; offload size alone shrinks the pool below what a 512K request needs. Our sandbox caps the CPU layer at 12 GB (`/dev/shm` is 16 GB); bare metal can use 96 GB like upstream.
-- On short requests TTFT is isolated by the 1024-token long-prefill threshold; cudagraph prefill capture is available via `CUDAGRAPH=1` (see PERFORMANCE.md).
+### A/B without editing the launcher
 
-## Performance
+The performance-sensitive knobs are environment variables:
 
-Measured on a single MI308X (192 GB, ROCm 7.2.3) — see [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for the full harness output.
+```bash
+MAX_MODEL_LEN=524288
+MAX_NUM_SEQS=64
+MAX_BATCHED_TOKENS=4096
+LONG_PREFILL_TOKEN_THRESHOLD=1024
+DSPARK_ENABLED=1
+DSPARK_K=7
+KV_OFFLOAD_GB=12
+KV_CACHE_BYTES=16000000000
+GPU_MEMORY_UTILIZATION=0.95
+MOE_BACKEND=triton
+```
 
-| Metric | Result |
-|---|---|
-| Single-stream decode incl. TTFT (128/512 tok) | 98.2 / 133.5 tok/s |
-| Pure decode (agent harness) | ~142 tok/s |
-| Concurrency C1/C2/C4/C8 aggregate | 128 / 197 / 286 / 446 tok/s |
-| Agent multi-turn hot TTFT (30K stable prefix) | **0.32s** (34x vs cold) |
-| Short-request TTFT during 200K prefill | 1.96s vs 1.91s alone (**+0.04s**) |
-| Prefix cache (cold → hot) | 8.7s → 0.5s (**17.5x**) |
-| Long-context ladder 50K/128K/256K/384K/500K | all pass, 500K = 91.7s |
+Example native-decoder baseline:
 
-Community reference (ryanzhou production stack on MI300X) reaches 168 tok/s
-single-stream and 11.5K tok/s cold prefill; the remaining gap is documented
-in PERFORMANCE.md rather than hidden.
+```bash
+DSPARK_ENABLED=0 bash scripts/02_serve_vllm.sh dsflash
+```
+
+Example scheduler-budget A/B:
+
+```bash
+MAX_BATCHED_TOKENS=2048 bash scripts/02_serve_vllm.sh dsflash
+```
+
+The defaults remain unchanged until a candidate wins the complete agent workload
+and correctness gates.
+
+## Coding-agent benchmark suite
+
+The benchmark directory covers different failure/performance modes instead of
+collapsing everything into a single tokens/s number:
+
+```text
+scripts/bench/
+├── bench_full.py                  general decode/prefill/cache/context suite
+├── bench_latency.py               TTFT / decode latency fixture
+├── bench_agent_trace.py           long-lived single agent, per-request cache accounting
+├── bench_session_concurrency.py   N independent growing agent histories
+├── bench_tool_roundtrip.py        streamed tool-call -> tool-result -> final answer
+├── bench_ttft_isolation.py        short request injected during long prefill
+└── collect_shapes.py              GEMM / runtime-shape inspection helper
+```
+
+The multi-turn cache metric uses each response's
+`usage.prompt_tokens_details.cached_tokens`. Engine-global Prometheus counter
+deltas are diagnostic only because they can include unrelated concurrent traffic.
+
+Full tool protocol testing is intentionally separate from the synthetic
+performance trace: a `role=tool` message is only emitted when it has a matching
+assistant tool-call ID.
+
+## 500K context and "adaptive" usage
+
+`--max-model-len 524288` is an admission/configuration ceiling, not a command to
+pre-allocate 512K KV for every short request. Paged KV/cache blocks are consumed
+as requests actually grow. A larger configured ceiling can still influence some
+planner/scheduler structures, so the next validation plan explicitly compares
+256K / 384K / 512K ceilings on identical short requests rather than assuming the
+upper bound is free.
+
+The product requirement remains: **allow approximately 500K context while
+preserving short-request latency and concurrency as much as possible.**
+
+## Prefix caching for agents
+
+Cache identity is based on token-prefix blocks, **not conversation IDs**. For a
+coding harness, keep the stable material first:
+
+```text
+system instructions
+-> stable tool schemas
+-> repository / AGENTS.md / policy context
+-> growing conversation
+-> newest tool output / user turn
+```
+
+Avoid injecting timestamps, random IDs, unstable JSON key order, or reordered
+tool schemas near the front of the prompt. If several untrusted users/agents
+share one endpoint, use a per-trust-group `cache_salt` so prefix reuse is
+isolated appropriately.
+
+## Rejected experiments on the pinned dev306 runtime
+
+Two FULL_AND_PIECEWISE graph-capture experiments were slower on this stack —
+including a second pass extended through the 4096-token chunk size — while
+consuming additional HBM and startup time. They remain disabled by default.
+DSpark K=5 also lost to K=7 for the measured single-stream latency path.
+
+Do not repeat those exact experiments unless the runtime/kernel stack changes.
+Details and numbers are in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+
+## Next GPU session
+
+The ordered test matrix is in
+[`docs/GPU_VALIDATION_PLAN.md`](docs/GPU_VALIDATION_PLAN.md). It starts with a
+runtime audit and default-profile regression, then measures scheduler budget,
+DSpark vs native decoding, configured context-ceiling overhead, CPU-KV behavior,
+and only afterward an isolated experiment against current upstream main.
+
+vLLM's current tuning guidance makes `max_num_batched_tokens` a workload tradeoff:
+smaller budgets favor decode/ITL while larger budgets favor prefill/TTFT and
+throughput. The correct value here is therefore selected from the coding-agent
+trace, not copied blindly from another deployment.
 
 ## Repository layout
 
-```
-vllm-rocm-dsv4-flash/
+```text
+.
+├── README.md
+├── LICENSE
+├── CONTRIBUTING.md
 ├── docs/
-│   └── PERFORMANCE.md          # measured baselines + harness methodology
-├── patches/                    # our environment-specific patch overlays
+│   ├── PERFORMANCE.md
+│   └── GPU_VALIDATION_PLAN.md
+├── patches/
+│   └── shared_offload_region.madvise-tolerant.py
 └── scripts/
-    ├── 00_check_env.sh         # environment probe (ROCm/vLLM/AITER/GPU/disk)
-    ├── 01_download_model.sh    # idempotent weight download (qwen38|qwen36|dsflash)
-    ├── 02_serve_vllm.sh        # native vllm serve launcher
-    ├── 03_benchmark.sh         # concurrency sweep via vllm bench
-    ├── 04_bench_decode.py      # decode / prefill / prefix-cache measurements
-    ├── env_setup.sh            # venv isolation (reuses system torch)
-    ├── install_vllm_nightly.sh # nightly vLLM + AITER + patch stack (idempotent)
-    └── bench/                  # benchmark harness (incl. agent multi-turn)
+    ├── 00_check_env.sh
+    ├── 01_download_model.sh
+    ├── 02_serve_vllm.sh
+    ├── 03_benchmark.sh
+    ├── 04_bench_decode.py
+    ├── env_setup.sh
+    ├── prepare_patch_repo.sh
+    ├── preflight_cpu.sh
+    ├── install_vllm_nightly.sh
+    ├── audit_runtime.py
+    └── bench/
 ```
 
-## Environment isolation
+## Upstream reference snapshot
 
-- **System Python is never modified.** The ROCm torch build shipped by the platform is exactly the one vLLM nightly was compiled against — conda/pip cannot reproduce it, so the install script creates a `--system-site-packages` venv that isolates version-sensitive packages (vLLM, AITER, flydsl) while reusing system torch.
-- `VLLM_ROCM_USE_AITER=1` enables the AITER MoE/FP8 kernels.
-- The venv lives on local disk for speed; a tarball snapshot is kept on persistent storage for restart recovery (see the private `infra` companion repo).
+At the time of this update, the current public ryanzhou MI300X production README
+reports a pinned `dev229` vLLM stack with **11.69K tok/s steady uncached C1
+prefill**, **158.8 tok/s median per-stream static DSpark-7 decode**, a **1,278
+tok/s C64 burst**, and **384K validated context**. Its production scheduler uses
+a 4096-token budget with capacity reserved for speculative verification.
 
-## Serving coding agents (multi-turn, long context, tool calls)
-
-Findings validated against this stack; references at the bottom.
-
-- **Prompt structure decides cache hits.** Keep the stable part first
-  (system prompt + tool schemas + repo context), append the growing part
-  last (history, tool results). The engine hashes token-prefix blocks — the
-  same prefix from a different conversation ID still hits. Measured session
-  hit rate: **95.9%** (30-turn agent trace, vs the 94.2% reference from the
-  vLLM x Mooncake agentic study).
-- **Multi-tenant isolation with `cache_salt`.** If several agents/users
-  share the endpoint, pass a per-agent `cache_salt` in the request body —
-  vLLM injects it into the first-block hash, so cache reuse stays inside a
-  trust group and timing side-channels are closed
-  (vLLM PR #17045 / CVE-2025-46570). Omit it for a single-user deployment;
-  `scripts/bench/bench_agent_trace.py --salt <value>` exercises it.
-- **Speculative decoding is the single-stream lever.** DSpark-7 is the
-  DeepSeek-recommended method for low-concurrency agent serving (60–85%
-  per-user speedup over MTP-1 in DeepSeek production; ~1.5-1.76x in
-  third-party single-stream benchmarks). K=7 beat K=5 on our hardware.
-- **TTFT isolation matters for mixed workloads.** A short request during a
-  200K prefill sees +0.04s TTFT overhead thanks to
-  `--long-prefill-token-threshold 1024`.
-- **Beyond one GPU**: distributed KV pools (vLLM x Mooncake) push agentic
-  hit rates to 92%+ under round-robin multi-instance routing; tool-call idle
-  windows are the offload sweet spot (MORI). Out of scope for a single
-  MI308X, listed as the scaling path.
+Those numbers are a useful reference, not an automatic target/config transplant:
+the runtime revision, overlay inventory, host CPU-KV capacity and this project's
+500K requirement differ.
 
 ## References
 
-- [Serving Agentic Workloads at Scale with vLLM x Mooncake](https://vllm-project.github.io/2026/05/06/mooncake-store.html) — Codex/SWE-bench Pro trace profile (131:1 in/out, 2.2K tokens/turn, 94.2% hit rate)
-- [vLLM Automatic Prefix Caching](https://docs.vllm.ai/en/stable/design/prefix_caching/) — hash design, `--prefix-caching-hash-algo`, `cache_salt`
-- [vLLM PR #17045: cache salting](https://github.com/vllm-project/vllm/pull/17045) — side-channel mitigation (CVE-2025-46570)
-- [DSpark: Confidence-Scheduled Speculative Decoding](https://arxiv.org/html/2607.05147) — DeepSeek-V4 serving; 60–85% per-user speedup vs MTP-1
-- [MORI: Exploiting Tool-Call Idle Windows for Offloading](https://arxiv.org/html/2606.00866) — phase-aware KV offload for agent serving
+- [vLLM](https://github.com/vllm-project/vllm) — serving engine
+- [vLLM optimization and tuning](https://docs.vllm.ai/en/latest/configuration/optimization/) — chunked-prefill / scheduler-budget tradeoffs
+- [vLLM speculative configuration](https://docs.vllm.ai/en/latest/api/vllm/config/speculative/) — speculative and dynamic-K configuration
+- [vLLM automatic prefix caching](https://docs.vllm.ai/en/stable/design/prefix_caching/) — block-hash cache design
+- [ryanzhou/deepseek-v4-flash-mi300x](https://github.com/ryanzhou/deepseek-v4-flash-mi300x) — primary gfx942 production reference and source of the historical overlay stack
+- [DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) — model checkpoint
 
 ## Contributing
 
-Bug reports and patches are welcome — especially anything that closes the 133 → 168 tok/s gap. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Acknowledgments
-
-- [vllm-project/vllm](https://github.com/vllm-project/vllm) — the serving engine (Apache-2.0)
-- [ryanzhou/deepseek-v4-flash-mi300x](https://github.com/ryanzhou/deepseek-v4-flash-mi300x) — community production stack for DSV4 on MI300X; source of the patch overlay
-- [AMD ROCm](https://rocm.docs.amd.com/) — platform
-- DeepSeek and Qwen — model weights (their respective licenses apply; weights are not redistributed here)
+Issues and patches are welcome, particularly reproducible improvements to
+fresh-prefill throughput, low-concurrency decode, long-context stability, cache
+retention, or tool-call correctness on gfx942. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE). Model weights are subject to their original licenses and are downloaded at runtime — they are not part of this repository.
+The repository code is licensed under Apache-2.0. Model weights and upstream
+components retain their own licenses and are not redistributed here.
