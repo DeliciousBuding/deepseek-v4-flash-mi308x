@@ -1,0 +1,2 @@
+# Repo is deployed to Linux hosts; never convert line endings on checkout.
+* text=auto eol=lf
