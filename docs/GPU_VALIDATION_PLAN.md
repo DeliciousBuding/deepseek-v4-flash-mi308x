@@ -279,10 +279,21 @@ scheduler or KV-allocation change.
 
 ## Phase 7 — long-context correctness, not just survival
 
-A request reaching 500K without crashing is necessary but insufficient. Add
-needle/retrieval fixtures at ~100K / 256K / 384K / 475K and verify exact recall
-of multiple separated values. Run both native and K7 for at least the longest
-case.
+A request reaching 500K without crashing is necessary but insufficient. The
+cache-isolated five-needle fixture produced this result:
+
+```text
+decoder    prompt tokens    result
+K7               100,069    PASS (5/5 exact)
+K7               256,057    PASS (5/5 exact)
+K7               384,053    FAIL twice (needle 4 mismatch)
+K7               475,068    PASS (5/5 exact)
+native           384,053    PASS (5/5 exact)
+```
+
+The repeated K7-only 384K failure is an open DSpark correctness risk. It is not
+a simple context cutoff because the sampled 475K case passed, but these results
+must not be presented as universal long-context recall.
 
 ```bash
 python3 scripts/bench/bench_long_context_recall.py \
@@ -293,9 +304,6 @@ python3 scripts/bench/bench_long_context_recall.py \
 The harness uses `/tokenize` to calibrate document size, places random exact
 values throughout the document, forces a cold cache with a first-block nonce and
 unique cache salt, and accepts only the ordered JSON array in final content.
-
-This follows the upstream production discipline: its current correctness report
-promotes long-context recall and tool rounds alongside throughput, not after it.
 
 ## Phase 8 — upstream production-runtime experiment
 

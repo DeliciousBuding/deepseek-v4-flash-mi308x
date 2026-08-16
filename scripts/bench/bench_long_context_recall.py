@@ -32,6 +32,16 @@ class RecallResult:
     def passed(self) -> bool:
         return self.returned_values == self.expected_values
 
+    @property
+    def position_matches(self) -> tuple[bool, ...]:
+        if self.returned_values is None:
+            return tuple(False for _ in self.expected_values)
+        return tuple(
+            position < len(self.returned_values)
+            and self.returned_values[position] == expected_value
+            for position, expected_value in enumerate(self.expected_values)
+        )
+
 
 def parse_arguments() -> argparse.Namespace:
     argument_parser = argparse.ArgumentParser(
@@ -276,9 +286,9 @@ def main() -> int:
         )
         if not recall_result.passed:
             print(
-                "  exact_match="
-                f"{recall_result.returned_values!r} expected_count="
-                f"{len(recall_result.expected_values)}",
+                f"  position_matches={recall_result.position_matches} "
+                f"returned_count={len(recall_result.returned_values or ())} "
+                f"expected_count={len(recall_result.expected_values)}",
                 flush=True,
             )
 
