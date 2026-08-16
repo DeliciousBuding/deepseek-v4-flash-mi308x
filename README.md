@@ -31,16 +31,21 @@ Measured on the MI308X profile in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md):
 |---|---:|
 | Configured context ceiling | **524,288 tokens** |
 | Long-context ladder | **50K / 128K / 256K / 384K / 500K all pass** |
-| 512-token generation incl. TTFT | **133.5 tok/s** |
-| C1 / C2 / C4 / C8 aggregate | **128 / 197 / 286 / 446 tok/s** |
-| Repeated-prefix latency | **8.67s -> 0.49s (17.5x)** |
-| Last per-request cached-token trace | **99.4% (856K / 860K prompt tokens)** |
-| Hot coding-agent TTFT | **~0.21–0.32s** across trace/warm-state revisions |
-| Short request during 200K prefill | **+0.04s TTFT overhead** |
-| Last streaming tool-call validation | **10/10 round trips** |
+| 512-token generation incl. TTFT | **~141.4 tok/s** (3 repeated runs: 141.4 / 141.4 / 141.3) |
+| C1 / C2 / C4 / C8 aggregate | **128.9 / 235.8 / 375.3 / 548.3 tok/s** |
+| 500K ladder wall time | **75.3s** for 475,005 prompt tokens + 64 output tokens |
+| 30-turn per-request prefix-cache hit | **95.46%** (1,030,144 / 1,079,154 prompt tokens) |
+| Ordinary hot coding-agent TTFT | **~0.20–0.36s** |
+| Auto tool-call validation | **100K 5/5, 200K 3/3**, no raw DSML leakage |
+| Cold 200K-prefill isolation | **known issue: +~2.1s short-request TTFT** with nonce-forced cold prefix |
+| Same-instance staged model load | **43.0s** after local SSD/page-cache warm-up (169.7s original NFS control) |
 
-The next GPU session re-establishes these numbers with the updated benchmark
-harness before changing the runtime.
+The performance profile now includes **MI308X-specific 80-CU AITER tables**.
+The complete 2026-08-16 experiment trail, including rejected candidates and raw
+operator/service numbers, is recorded in [`docs/TUNING_LOG_2026-08-16.md`](docs/TUNING_LOG_2026-08-16.md).
+Correctness/tool/context gates pass; cold long-prefill tail-latency isolation is
+still an open scheduler problem and is intentionally reported as such rather than
+hidden by prefix-cache-warmed measurements.
 
 ## Stable runtime provenance
 
@@ -82,7 +87,10 @@ The primary upstream reference is
 [ryanzhou/deepseek-v4-flash-mi300x](https://github.com/ryanzhou/deepseek-v4-flash-mi300x).
 This project ports that source stack to a **native Docker-less dev306 venv** and
 adds restart recovery, provenance auditing, 500K-class validation, coding-agent
-benchmarks and sandbox-specific compatibility.
+benchmarks and sandbox-specific compatibility. MI308X is not treated as an
+MI300X alias: both are gfx942, but this host reports **80 CUs** while the inherited
+MI300X AITER tables are keyed for **304 CUs**. The launcher therefore detects the
+AITER `(gfx, cu_num)` key and selects the repository's measured 80-CU tables.
 
 ## Quick start
 
@@ -131,12 +139,19 @@ The serve path checks for all **48 weight shards** before launch.
 
 ```bash
 python3 scripts/audit_runtime.py
+
+# Optional but strongly recommended on a GPU session: make an ephemeral local-SSD
+# hot copy. The launcher auto-prefers it only when all 48 shards validate.
+bash scripts/stage_model_local.sh dsflash
+
 bash scripts/02_serve_vllm.sh dsflash
 ```
 
 `audit_runtime.py` verifies the runtime versions, patch-source revision,
 installed overlays, patched C++ extension, sparse-prefill artifact and restart
-snapshots.
+snapshots. Runtime-generated AITER, torch-extension and ROCm COMGR caches are
+warm-start accelerators; `snapshot_runtime_caches.sh` persists them after a
+healthy warm-up.
 
 ## CPU-instance preparation
 
@@ -312,6 +327,7 @@ or kernel stack changes.
 ├── CONTRIBUTING.md
 ├── docs/
 │   ├── PERFORMANCE.md
+│   ├── TUNING_LOG_2026-08-16.md
 │   └── GPU_VALIDATION_PLAN.md
 ├── patches/
 │   └── shared_offload_region.madvise-tolerant.py

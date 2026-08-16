@@ -187,6 +187,18 @@ def main() -> int:
         if not path.exists():
             failures.append(f"missing {label}")
 
+    tuning_validator = RECIPE_REPO / "scripts" / "validate_tuning_tables.py"
+    tuning_check = subprocess.run(
+        [str(py), str(tuning_validator)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    print(tuning_check.stdout.strip())
+    if tuning_check.returncode != 0:
+        failures.append("MI308X tuning table validation failed")
+
     # Runtime-generated caches improve restart latency but are not correctness
     # prerequisites. A fresh GPU instance can regenerate them on first warm-up.
     for path, label in [
@@ -194,6 +206,8 @@ def main() -> int:
         (Path("/mnt/workspace/.venvs/aiter_cache.tar.gz"), "persistent AITER cache snapshot"),
         (Path("/root/.cache/torch_extensions"), "torch_extensions runtime cache"),
         (Path("/mnt/workspace/.venvs/torch_ext_cache.tar.gz"), "persistent torch_extensions snapshot"),
+        (Path("/root/.cache/comgr"), "ROCm COMGR runtime cache"),
+        (Path("/mnt/workspace/.venvs/comgr_cache.tar.gz"), "persistent ROCm COMGR snapshot"),
     ]:
         print(f"{'OK' if path.exists() else 'WARN'} {label}")
         if not path.exists():

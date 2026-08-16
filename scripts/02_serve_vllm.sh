@@ -10,7 +10,9 @@
 set -euo pipefail
 
 MODEL_KEY="${1:-qwen38}"
+MODEL_BASE_EXPLICIT="${MODEL_BASE+x}"
 MODEL_BASE="${MODEL_BASE:-/mnt/workspace/models}"
+RECIPE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8000}"
 
@@ -81,9 +83,31 @@ elif [ "$MODEL_KEY" = "qwen36" ]; then
     --host "$HOST" --port "$PORT"
 
 elif [ "$MODEL_KEY" = "dsflash" ]; then
+  count_model_shards() {
+    local path="$1"
+    if [ ! -d "$path" ]; then
+      printf '0\n'
+      return 0
+    fi
+    find "$path" -maxdepth 1 -type f -name 'model-*.safetensors' 2>/dev/null | wc -l
+  }
+
+  # Prefer the ephemeral local-disk hot copy when it is complete. MODEL_BASE
+  # remains an explicit override; otherwise fall back to persistent NFS.
+  HOT_MODEL_BASE="${HOT_MODEL_BASE:-/root/models}"
+  if [ -z "$MODEL_BASE_EXPLICIT" ]; then
+    hot_path="$HOT_MODEL_BASE/deepseek-ai/DeepSeek-V4-Flash-0731"
+    hot_shards=$(count_model_shards "$hot_path")
+    if [ "$hot_shards" -eq 48 ] && [ -f "$hot_path/model.safetensors.index.json" ]; then
+      MODEL_BASE="$HOT_MODEL_BASE"
+      echo "[model] using local hot copy: $hot_path"
+    else
+      echo "[model] local hot copy incomplete (${hot_shards}/48); using persistent base: $MODEL_BASE"
+    fi
+  fi
   MODEL_PATH="$MODEL_BASE/deepseek-ai/DeepSeek-V4-Flash-0731"
-  # 分片完整性预检: 持久化只留 30/48 shard, 缺的分片须先 bash 01_download_model.sh dsflash 补下
-  SHARD_COUNT=$(ls "$MODEL_PATH"/model-*.safetensors 2>/dev/null | wc -l)
+  # Full 48-shard integrity gate before launch.
+  SHARD_COUNT=$(count_model_shards "$MODEL_PATH")
   if [ "$SHARD_COUNT" -lt 48 ]; then
     echo "❌ 权重不完整: $SHARD_COUNT/48 shard。请先补下缺失分片:"
     echo "   bash 01_download_model.sh dsflash   # 只补缺失的 shard 31-48(~58G), 跳过已有的 1-30"
@@ -101,8 +125,38 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
   #   AITER_CONFIG    → A8W8 blockscale GEMM 调优表
   export VLLM_ROCM_OPUS_PREFILL="${VLLM_ROCM_OPUS_PREFILL:-1}"
   export VLLM_ROCM_USE_SKINNY_GEMM="${VLLM_ROCM_USE_SKINNY_GEMM:-0}"
-  export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE="${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE:-$PATCH_REPO_DIR/tuning/dsv4-mi300x-a8w8-blockscale-bpreshuffle-ck.batch4096.csv}"
-  export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE="${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE:-$PATCH_REPO_DIR/tuning/dsv4-a8w8-blockscale-tuned-gemm.mi300x.decode-candidate.csv}"
+
+  # gfx942 is not one tuning domain: MI308X reports 80 CUs while MI300X
+  # production tables are keyed for 304 CUs. AITER includes cu_num in its
+  # lookup key, so blindly reusing the MI300X CSV silently falls back to
+  # default kernels. Auto-select the measured 80-CU tables when applicable.
+  if [ -z "${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE:-}" ] || \
+     [ -z "${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE:-}" ]; then
+    AITER_GFX="unknown"
+    AITER_CU="unknown"
+    aiter_hw=$(python3 - <<'PY' 2>/dev/null || true
+from aiter.jit.utils.chip_info import get_gfx, get_cu_num
+print(get_gfx(), get_cu_num())
+PY
+)
+    if [ -n "$aiter_hw" ]; then
+      read -r AITER_GFX AITER_CU <<<"$aiter_hw"
+    fi
+    MI308X_BP="$RECIPE_ROOT/tuning/dsv4-mi308x-80cu-a8w8-blockscale-bpreshuffle.csv"
+    MI308X_STD="$RECIPE_ROOT/tuning/dsv4-mi308x-80cu-a8w8-blockscale.csv"
+    if [ "${AITER_GFX:-}" = "gfx942" ] && [ "${AITER_CU:-}" = "80" ] && \
+       [ -f "$MI308X_BP" ] && [ -f "$MI308X_STD" ]; then
+      : "${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE:=$MI308X_BP}"
+      : "${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE:=$MI308X_STD}"
+      echo "[aiter] gfx942/80-CU detected; using MI308X measured tuning tables"
+    else
+      : "${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE:=$PATCH_REPO_DIR/tuning/dsv4-mi300x-a8w8-blockscale-bpreshuffle-ck.batch4096.csv}"
+      : "${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE:=$PATCH_REPO_DIR/tuning/dsv4-a8w8-blockscale-tuned-gemm.mi300x.decode-candidate.csv}"
+      echo "[aiter] hardware-specific 80-CU table not selected (gfx=${AITER_GFX:-unknown} cu=${AITER_CU:-unknown}); using pinned upstream fallback"
+    fi
+  fi
+  export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE
+  export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE
 
   # Production defaults. Every performance-sensitive scheduling knob is an env
   # override so benchmarks can A/B without editing this file. Defaults preserve

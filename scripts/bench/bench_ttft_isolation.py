@@ -9,9 +9,10 @@ Usage:
   python3 bench_ttft_isolation.py [long_tokens] [short_tokens]
 Defaults: 200K long prefill, 8-token short request.
 """
+import argparse
 import json
 import os
-import sys
+import secrets
 import threading
 import time
 import urllib.request
@@ -48,15 +49,29 @@ def stream_request(prompt, max_tokens):
 
 
 def main():
-    long_tokens = int(sys.argv[1]) if len(sys.argv) > 1 else 200000
+    ap = argparse.ArgumentParser()
+    ap.add_argument("long_tokens", nargs="?", type=int, default=200000)
+    ap.add_argument("short_tokens", nargs="?", type=int, default=8)
+    ap.add_argument(
+        "--reuse-prefix",
+        action="store_true",
+        help="reuse the deterministic long prefix (cache diagnostic only); default forces a cold prefix",
+    )
+    args = ap.parse_args()
+    long_tokens = args.long_tokens
+    short_tokens = args.short_tokens
     unit = ("The software engineering coding standards mandate camelCase for "
             "function names, snake_case for variable names, explicit error "
             "handling, single responsibility, dependency injection. ")
-    long_prompt = unit * max(1, long_tokens // 40)
+    # Prefix caching makes an immediate rerun look artificially perfect. Put a
+    # nonce in the *first* block by default so every measurement exercises a
+    # genuinely cold long prefill. --reuse-prefix is intentionally diagnostic.
+    nonce = "" if args.reuse_prefix else f"cold-isolation-{secrets.token_hex(8)}: "
+    long_prompt = nonce + unit * max(1, long_tokens // 40)
 
     # Baseline: short request alone (no competing prefill)
     t0 = time.time()
-    ttft_alone = stream_request("Say ok.", 8)
+    ttft_alone = stream_request("Say ok.", short_tokens)
     print(f"short TTFT alone:        {ttft_alone:.2f}s (total {time.time()-t0:.2f}s)")
 
     # Start the long prefill, then inject the short request 1.5s later
@@ -64,14 +79,14 @@ def main():
 
     def long_worker():
         t0 = time.time()
-        stream_request(long_prompt, 8)
+        stream_request(long_prompt, short_tokens)
         result["long_total"] = time.time() - t0
 
     thread = threading.Thread(target=long_worker)
     thread.start()
     time.sleep(1.5)
     t0 = time.time()
-    ttft_late = stream_request("Say ok.", 8)
+    ttft_late = stream_request("Say ok.", short_tokens)
     result["short_late"] = time.time() - t0
     thread.join()
 

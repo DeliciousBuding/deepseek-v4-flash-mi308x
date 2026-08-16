@@ -66,11 +66,11 @@ changing those defaults: `MAX_MODEL_LEN`, `MAX_NUM_SEQS`,
 
 | Target | Measured prompt tokens | Total time | Result |
 |---:|---:|---:|---|
-| 50K | 47,505 | 14.7s | pass |
-| 128K | 121,605 | 27.4s | pass |
-| 256K | 243,205 | 71.6s | pass |
-| 384K | 364,805 | 73.4s | pass |
-| 500K | 475,005 | 91.7s | **pass** |
+| 50K | 47,505 | 16.7s | pass |
+| 128K | 121,605 | 25.3s | pass |
+| 256K | 243,205 | 52.3s | pass |
+| 384K | 364,805 | 66.2s | pass |
+| 500K | 475,005 | **75.3s** | **pass** |
 
 The ladder intentionally shares a prefix, so the later rows are not fresh-prefill
 benchmarks. Supporting a 524,288-token maximum does not allocate 512K KV to each
@@ -93,11 +93,13 @@ and tool output after them.
 
 ### Cache-accounting correction
 
-An earlier 30-turn report quoted **95.9%** using engine-global Prometheus counter
-deltas. Those counters remain useful for engine trends but can include concurrent
-clients. Immediately before the last disconnect, the agent trace was re-run using
-each response's `usage.prompt_tokens_details.cached_tokens`: **856K / 860K prompt
-tokens cached = 99.4%**, with hot TTFT around **0.21 s** in that run.
+Engine-global Prometheus deltas are diagnostic only because they can include
+concurrent clients. The current 30-turn gate uses each response's
+`usage.prompt_tokens_details.cached_tokens`: **1,030,144 / 1,079,154 = 95.46%**.
+Ordinary hot turns were roughly **0.20–0.36s TTFT**; turns that deliberately append
+a large new environment/tool observation rise to ~0.8–0.9s and then recover.
+A previous warm-state trace reached 99.4%; both measurements use the same
+per-request accounting, but the current 30-turn run is the promotion headline.
 
 `scripts/bench/bench_agent_trace.py` now makes per-request `cached_tokens` the
 authoritative metric. The updated harness also defaults to **not** replaying
@@ -105,15 +107,15 @@ authoritative metric. The updated harness also defaults to **not** replaying
 hidden reasoning out of conversation history; `--include-reasoning-history`
 provides the explicit comparison mode.
 
-Historical coding-agent points:
+Current coding-agent gate summary:
 
-| Metric | Last measured local result |
+| Metric | Current production result |
 |---|---:|
-| repeated-prefix speedup | 17.5x |
-| per-request cached prompt tokens | **99.4% (856K/860K)** |
-| hot TTFT | ~0.21–0.32s depending on trace revision / warm state |
-| earlier 30-turn average decode | ~119 tok/s |
-| streaming tool-call survival | **10/10** before disconnect |
+| 30-turn per-request cached prompt tokens | **95.46%** |
+| ordinary hot TTFT | **~0.20–0.36s** |
+| average hot-trace decode | **167.3 tok/s** |
+| auto tool-call survival | **100K 5/5; 200K 3/3** |
+| true-cold 200K isolation | **DEGRADED: +~2.1s short TTFT** |
 
 The repository now contains:
 
@@ -127,18 +129,26 @@ assistant tool-call ID.
 
 ## Local TTFT isolation
 
-A short request injected during a 200K-token prefill received its first semantic
-token in **1.96s vs 1.91s alone (+0.04s)**. The 1,024-token long-prefill cap kept
-the long cold request from monopolizing the scheduler.
+The old `+0.04s` result was **cache-contaminated**: the benchmark reused the same
+deterministic 200K prefix, so an immediate rerun could turn the long request from
+~45s into ~0.6s via APC. `bench_ttft_isolation.py` now prepends a random nonce by
+default, forcing a genuinely cold prefix (`--reuse-prefix` is diagnostic only).
+
+With the production scheduler and the promoted 80-CU tuning tables, a true-cold
+200K run measured **0.05s alone vs 2.12s during prefill (+2.07s)**. This remains a
+known tail-latency issue. Two attempted fixes were rejected: forcing the 1,024
+chunk cap even for a solo long request made the long request slower and the short
+overhead ~+3.08s; adding extra M~1024/1031/1032 GEMM tuning did not solve the
+end-to-end scheduler isolation problem.
 
 ## Local concurrency
 
 | Concurrency | Aggregate tok/s | Approx. per-stream tok/s |
 |---:|---:|---:|
-| C1 | 128.2 | 128.2 |
-| C2 | 197.3 | 98.7 |
-| C4 | 286.2 | 71.5 |
-| C8 | **446.2** | 55.8 |
+| C1 | **128.9** | 128.9 |
+| C2 | **235.8** | 117.9 |
+| C4 | **375.3** | 93.8 |
+| C8 | **548.3** | 68.5 |
 
 This fixed the initial regression where an early microbenchmark produced only
 ~63 tok/s aggregate at C2 and ~81 at C4. The v2 profile scales monotonically.
@@ -147,10 +157,12 @@ This fixed the initial regression where an early microbenchmark produced only
 
 | Output | Total time incl. TTFT | tok/s incl. TTFT |
 |---:|---:|---:|
-| 128 | 1.30s | 98.2 |
-| 512 | 3.83s | **133.5** |
+| 128 | ~1.1s | 119.1 |
+| 512 | ~3.6s | **140.8** |
 
-A separate agent run measured roughly ~142 tok/s pure decode after TTFT.
+A fixed 512-token fixture repeated three more times at **141.4 / 141.4 / 141.3
+tok/s**, with identical DSpark acceptance, so ~141 tok/s is the current stable
+low-concurrency control rather than a one-off wall-clock spike.
 
 ## Current upstream reference (2026-08-16)
 
@@ -171,6 +183,35 @@ runtime based on vLLM `0.26.1rc1.dev229+g124154a88.rocm723` + AITER 0.1.19:
 The same source overlays can behave differently because the runtime base differs.
 Our project also has a 16 GB `/dev/shm` sandbox constraint, only a 12 GB CPU-KV
 tier, and a required ~500K context ceiling.
+
+## MI308X 80-CU AITER tuning
+
+The largest new finding in this GPU session was hardware-key mismatch rather than
+a vLLM scheduler bug. `torch`, `rocminfo` and AITER all report this MI308X as
+`gfx942` with **80 compute units**. The inherited ryanzhou MI300X tuning CSVs are
+keyed with `cu_num=304`; because AITER lookup includes both `gfx` and `cu_num`,
+those rows silently missed and the service was largely running default A8W8 GEMM
+kernels.
+
+The repository now carries two measured tables:
+
+- `tuning/dsv4-mi308x-80cu-a8w8-blockscale-bpreshuffle.csv` — **13 rows**;
+- `tuning/dsv4-mi308x-80cu-a8w8-blockscale.csv` — **24 rows**.
+
+They cover the production C1 (`M=7/8`), C8 (`M=56/64`) and long-prefill
+(`M=4096`) shapes that won production-operator A/Bs with numerical checks. Typical
+operator gains included ~59–63% latency reduction for key C1 bpreshuffle GEMMs,
+~16–21% for C1 standard GEMMs, and ~45–78% for several C8/prefill standard
+GEMMs. End-to-end gains are smaller because GEMM is only part of the request:
+~141.4 tok/s single-stream and 548.3 tok/s C8 are the measured service-level
+results.
+
+AITER 0.1.19's tuner compare path has a same-process native-extension reload
+trap: after rebuilding a candidate `.so`, the Python process may still hold the
+old extension registry. Candidate rows that reported "kernel not present" were
+therefore revalidated in a **fresh Python process** before promotion. Only rows
+with numerical PASS and measured production-operator benefit remain in the
+production CSVs.
 
 ## Tuning history
 
@@ -197,7 +238,8 @@ C4 177 -> 286, C8 372 -> 446, repeated-prefix speedup ~14x -> 17.5x.
 | FULL_AND_PIECEWISE graph capture through 3712 | cold prefill 2509 vs 3222 tok/s; decode flat; ~+10 GB HBM; slower startup | reject |
 | same capture extended through 3840/4096 | cold prefill 2504 tok/s; decode flat | reject |
 | DSpark K=5 vs K=7 | 121.7 vs 133.5 tok/s at decode-512 | keep K=7 for C1 latency |
-| AITER M=1/2 source tuning | tuning harness absent from shipped wheel | defer to separate source/CK environment |
+| Force 1024 cap for solo long prefill | 200K total ~62s and short overhead ~+3.08s | reject; production scheduler unchanged |
+| MI308X 1K-shape expansion | operator wins, but true-cold 200K isolation did not improve (+2.94s in one run) | keep out of production table |
 
 Do not repeat the two graph experiments without changing the runtime base or
 kernel stack.

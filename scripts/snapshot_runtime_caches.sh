@@ -31,6 +31,9 @@ snapshot() {
 # contents rather than an outer .aiter directory.
 snapshot /root/.aiter "$PERSIST/aiter_cache.tar.gz" "AITER" contents
 
-# bootstrap.sh restores this archive into /root/.cache, so preserve the
-# torch_extensions directory itself.
+# bootstrap.sh restores these archives into /root/.cache, so preserve each
+# cache directory itself. torch_extensions contains the custom HIP/C++ modules;
+# COMGR holds ROCm compiler code-object cache entries generated during model
+# load, graph capture and first-shape warm-up.
 snapshot /root/.cache/torch_extensions "$PERSIST/torch_ext_cache.tar.gz" "torch_extensions" directory
+snapshot /root/.cache/comgr "$PERSIST/comgr_cache.tar.gz" "ROCm COMGR" directory

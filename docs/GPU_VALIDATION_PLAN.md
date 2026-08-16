@@ -33,14 +33,13 @@ same patch source != byte-identical serving runtime.
 Last local control measurements:
 
 ```text
-512-token generation incl. TTFT    133.5 tok/s
-C1/C2/C4/C8 aggregate              128 / 197 / 286 / 446 tok/s
-50K -> 500K ladder                 all pass
-repeated-prefix speedup            17.5x
-last per-request cached tokens     99.4% (856K / 860K)
-hot agent TTFT                     ~0.21-0.32s
-streaming tool roundtrip           10/10 before disconnect
-200K-prefill short-request cost    +0.04s TTFT
+512-token generation incl. TTFT    ~141.4 tok/s
+C1/C2/C4/C8 aggregate              128.9 / 235.8 / 375.3 / 548.3 tok/s
+50K -> 500K ladder                 all pass (500K: 75.3s wall time)
+30-turn per-request cached tokens  95.46% (1,030,144 / 1,079,154)
+hot agent TTFT                     ~0.20-0.36s ordinary hot turns
+auto tool roundtrip                100K 5/5; 200K 3/3
+true-cold 200K isolation           KNOWN DEGRADED: +~2.1s short TTFT
 ```
 
 ## Phase 0 — runtime integrity before serving
@@ -57,7 +56,7 @@ python3 scripts/audit_runtime.py
 The audit must have **zero correctness/provenance failures**. It verifies the
 pinned vLLM/AITER/flydsl versions, upstream patch commit, installed overlay
 hashes, top-k binary, sparse-prefill module, JIT source, and the persistent venv
-snapshot. Runtime-generated AITER/torch caches are warm-start accelerators: a
+snapshot. Runtime-generated AITER/torch/ROCm-COMGR caches are warm-start accelerators: a
 fresh host may warn when they are absent, but that does not block the first
 controlled warm-up.
 
@@ -72,7 +71,7 @@ Start with **no environment overrides**. Warm the runtime once, then run:
 python3 scripts/bench/bench_full.py all
 python3 scripts/bench/bench_agent_trace.py 30 20000
 python3 scripts/bench/bench_session_concurrency.py --sessions 4 --rounds 8
-python3 scripts/bench/bench_ttft_isolation.py 200000
+python3 scripts/bench/bench_ttft_isolation.py 200000  # random prefix nonce => true cold prefill
 
 # tool protocol: short prefix / forced tool
 python3 scripts/bench/bench_tool_roundtrip.py --rounds 10 --mode forced --prefix-tokens 20000
@@ -96,14 +95,14 @@ Minimum promotion gates:
 |---|---|
 | engine | no EngineCore death / restart |
 | long context | 50K, 128K, 256K, 384K, 500K complete |
-| 512-token single stream | >= 126 tok/s incl. TTFT (~5% band from 133.5) |
-| C8 aggregate | >= 424 tok/s (~5% band from 446) |
+| 512-token single stream | >= 134 tok/s incl. TTFT (~5% band from 141.4) |
+| C8 aggregate | >= 521 tok/s (~5% band from 548.3) |
 | warm agent cache | >= 95% by **per-request** cached prompt tokens |
 | tool short-prefix | 10/10 valid round trips |
 | tool 100K auto | 10/10, no raw DSML in content |
 | tool 200K auto | 8/8, no raw DSML in content |
 | concurrent tool parser | 16/16, no malformed/leaked markers |
-| long-prefill isolation | added short-request TTFT <= 0.25s |
+| long-prefill isolation | **open issue** until nonce-forced cold added TTFT <= 0.5s |
 
 Why the tool gates are strict: current vLLM issue reports include a DeepSeek-V4
 long-context case where the model may omit the DSML tool-call START wrapper and

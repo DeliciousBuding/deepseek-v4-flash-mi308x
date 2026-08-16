@@ -77,6 +77,12 @@ PY
   fi
 done < <(find "$ROOT/scripts" -type f -name '*.py' -print0)
 
+if python3 "$ROOT/scripts/validate_tuning_tables.py"; then
+  ok "MI308X 80-CU tuning tables validated"
+else
+  fail "MI308X 80-CU tuning table validation failed"
+fi
+
 section "3. Pin exact upstream patch source"
 if [ "$PREPARE_PATCH_REPO" = "1" ]; then
   if PATCH_REPO="$PATCH_REPO" bash "$ROOT/scripts/prepare_patch_repo.sh"; then
@@ -165,7 +171,7 @@ else
   fail "persistent vLLM venv snapshot missing: $PERSIST/vllm.tar.gz"
 fi
 
-for cache in aiter_cache.tar.gz torch_ext_cache.tar.gz; do
+for cache in aiter_cache.tar.gz torch_ext_cache.tar.gz comgr_cache.tar.gz; do
   if [ -f "$PERSIST/$cache" ]; then
     if tar -tf "$PERSIST/$cache" >/dev/null 2>&1; then
       ok "$cache exists and is readable"

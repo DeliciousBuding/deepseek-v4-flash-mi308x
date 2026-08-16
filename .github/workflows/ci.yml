@@ -27,6 +27,8 @@ jobs:
           python-version: "3.12"
       - name: Compile check
         run: python -m compileall -q scripts/
+      - name: Validate MI308X tuning tables
+        run: python scripts/validate_tuning_tables.py
       - name: Benchmark CLI imports
         run: |
           python scripts/bench/bench_agent_trace.py --help >/dev/null
