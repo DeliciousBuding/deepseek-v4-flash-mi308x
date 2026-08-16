@@ -2,20 +2,24 @@
 """bench_agent_trace.py — coding-agent multi-turn session benchmark.
 
 Simulates a realistic coding-agent workload against the OpenAI-compatible
-endpoint, aligned with the trace profile from the vLLM x Mooncake agentic
-serving study:
+endpoint:
 
   - stable prefix: system prompt + tool schema + repo context
-  - growing tail: previous user/assistant/tool turns
-  - output: coding-sized completions
+  - growing tail: previous user/assistant turns
+  - periodic environment/tool observations folded into the next user turn
   - streaming TTFT + per-request prompt cache accounting
 
-The authoritative cache metric is ``usage.prompt_tokens_details.cached_tokens``
-from each request. Engine-wide /metrics counters are retained only as a
-fallback/diagnostic because concurrent traffic can make a global counter delta
-look like cache activity from this session.
+This benchmark intentionally does NOT emit synthetic ``role=tool`` messages.
+A role=tool message is only protocol-valid when it corresponds to an earlier
+assistant tool_call id. Full tool protocol correctness is exercised separately
+by ``bench_tool_roundtrip.py``.
 
-Env overrides: VLLM_API_KEY / VLLM_API_KEY_FILE, VLLM_BASE_URL.
+The authoritative cache metric is
+``usage.prompt_tokens_details.cached_tokens`` from each request. Engine-wide
+/metrics counters are retained only as a diagnostic because concurrent traffic
+can make a global counter delta include other clients.
+
+Env overrides: VLLM_API_KEY / VLLM_API_KEY_FILE, VLLM_BASE_URL, VLLM_MODEL.
 Usage:
   python3 bench_agent_trace.py [turns] [prefix_tokens] [--salt SALT]
 Defaults: 30 turns, ~20K stable prefix, output 256 tokens/turn.
@@ -63,11 +67,7 @@ def make_repo_context(target_tokens: int) -> str:
 
 
 def engine_cache_metrics() -> tuple[float, float] | None:
-    """Engine-global (hits, queries) token counters from /metrics.
-
-    These are intentionally NOT used as the authoritative per-session metric
-    when per-request cached_tokens is available.
-    """
+    """Engine-global (hits, queries) token counters from /metrics."""
     try:
         txt = urllib.request.urlopen(BASE + "/metrics", timeout=10).read().decode()
     except Exception:
@@ -82,13 +82,11 @@ def engine_cache_metrics() -> tuple[float, float] | None:
 
 def _semantic_delta(delta: dict) -> bool:
     """True when a streaming chunk contains model output, not role metadata."""
-    if delta.get("content"):
-        return True
-    if delta.get("reasoning_content"):
-        return True
-    if delta.get("tool_calls"):
-        return True
-    return False
+    return bool(
+        delta.get("content")
+        or delta.get("reasoning_content")
+        or delta.get("tool_calls")
+    )
 
 
 def chat_stream(messages, max_tokens=256, temperature=0.0, salt=None):
@@ -190,12 +188,15 @@ def main():
     results = []
     global0 = engine_cache_metrics()
     t_session = time.perf_counter()
+    pending_observation = ""
 
     for turn in range(1, args.turns + 1):
-        user_turn = (
+        task = (
             f"[turn {turn}] Analyze handlers/auth.go for a subtle token-refresh "
             "race and propose a fix with tests."
         )
+        user_turn = (pending_observation + "\n" + task).strip()
+        pending_observation = ""
         messages = list(history) + [{"role": "user", "content": user_turn}]
 
         r = chat_stream(
@@ -206,19 +207,20 @@ def main():
         results.append(r)
 
         history.append({"role": "user", "content": user_turn})
-        # Keep the model's actual answer in the growing tail. If a particular
-        # parser exposes only reasoning text, retain that rather than inserting
-        # an unrelated synthetic answer.
+        # Keep the actual model answer in the growing tail. If a parser exposes
+        # only reasoning text, retain that rather than a synthetic unrelated
+        # reply.
         answer = r["content"] or r["reasoning"] or f"turn-{turn} completed"
         history.append({"role": "assistant", "content": answer})
+
+        # Emulate a large read/test result without forging an invalid role=tool
+        # record. It is presented as an environment observation at the start of
+        # the NEXT user turn. Full role=tool semantics are tested elsewhere.
         if turn % 4 == 0:
-            history.append({
-                "role": "tool",
-                "content": (
-                    f"read_file(handlers/auth.go) -> {turn * 2048} bytes of "
-                    "source returned; no network access required"
-                ),
-            })
+            pending_observation = (
+                "[environment observation from read_file handlers/auth.go] "
+                + ("auth middleware source, stack trace, and focused test output; " * 180)
+            )
 
         cache_state = "hot" if turn > 1 else "cold"
         print(
