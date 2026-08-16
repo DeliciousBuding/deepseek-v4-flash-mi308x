@@ -1,30 +1,18 @@
 #!/usr/bin/env bash
-# CPU-instance preflight for the DeepSeek-V4-Flash ROCm recipe.
+# CPU-only preflight for the DeepSeek-V4-Flash ROCm recipe.
 #
-# Goal: finish every persistent-storage / source / artifact check that does not
-# require an AMD GPU. After this passes, switching to the GPU instance should
-# only require runtime restore/audit, model launch, and measured A/Bs.
-#
-# Safe on CPU-only DSW instances: this script never starts vLLM and does not
-# import GPU kernels.
-#
-# Usage:
-#   bash scripts/preflight_cpu.sh
-#
-# Optional overrides:
-#   MODEL_BASE=/mnt/workspace/models
-#   WHEELS=/mnt/workspace/wheels
-#   PATCH_REPO=/mnt/workspace/deepseek-v4-flash-mi300x
-#   PREPARE_PATCH_REPO=1   # default: pin exact upstream source revision
+# Finish every persistent-storage/source/artifact check that does not require an
+# AMD GPU. Host-specific bootstrap, credentials and private topology stay outside
+# this public repository.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL_BASE="${MODEL_BASE:-/mnt/workspace/models}"
-MODEL_PATH="$MODEL_BASE/deepseek-ai/DeepSeek-V4-Flash-0731"
+MODEL_PATH="${MODEL_PATH:-$MODEL_BASE/deepseek-ai/DeepSeek-V4-Flash-0731}"
 WHEELS="${WHEELS:-/mnt/workspace/wheels}"
 PATCH_REPO="${PATCH_REPO:-/mnt/workspace/deepseek-v4-flash-mi300x}"
 PREPARE_PATCH_REPO="${PREPARE_PATCH_REPO:-1}"
-PERSIST="/mnt/workspace/.venvs"
+PERSIST_DIR="${PERSIST_DIR:-/mnt/workspace/.venvs}"
 
 failures=0
 warnings=0
@@ -42,8 +30,8 @@ section() {
 
 section "1. Repository integrity"
 if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  HEAD="$(git -C "$ROOT" rev-parse HEAD)"
-  ok "recipe git HEAD $HEAD"
+  head_sha="$(git -C "$ROOT" rev-parse HEAD)"
+  ok "recipe git HEAD $head_sha"
   if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
     warn "recipe checkout has local changes/untracked files"
     git -C "$ROOT" status --short
@@ -54,7 +42,7 @@ else
   fail "$ROOT is not a git checkout"
 fi
 
-section "2. Static syntax checks"
+section "2. Static syntax and tuning-table checks"
 while IFS= read -r -d '' shfile; do
   if bash -n "$shfile"; then
     ok "bash -n ${shfile#$ROOT/}"
@@ -95,8 +83,8 @@ else
 fi
 
 if [ -d "$PATCH_REPO/.git" ]; then
-  PATCH_HEAD="$(git -C "$PATCH_REPO" rev-parse HEAD 2>/dev/null || true)"
-  echo "patch HEAD: ${PATCH_HEAD:-unknown}"
+  patch_head="$(git -C "$PATCH_REPO" rev-parse HEAD 2>/dev/null || true)"
+  echo "patch HEAD: ${patch_head:-unknown}"
 fi
 
 section "4. Model weights"
@@ -130,9 +118,9 @@ find_one() {
     ok "$label: $(basename "$f")"
     python3 - "$f" <<'PY' || exit 5
 import sys, zipfile
-p=sys.argv[1]
+p = sys.argv[1]
 with zipfile.ZipFile(p) as z:
-    bad=z.testzip()
+    bad = z.testzip()
     if bad:
         raise SystemExit(f"corrupt wheel member: {bad}")
 print("     wheel zip integrity OK")
@@ -146,10 +134,10 @@ find_one "AITER 0.1.19" 'amd_aiter-0.1.19-*.whl'
 find_one "flydsl 0.2.4" 'flydsl-0.2.4-*.whl'
 
 section "6. Persistent restart artifacts"
-if [ -f "$PERSIST/vllm.tar.gz" ]; then
-  size="$(du -h "$PERSIST/vllm.tar.gz" | cut -f1)"
+if [ -f "$PERSIST_DIR/vllm.tar.gz" ]; then
+  size="$(du -h "$PERSIST_DIR/vllm.tar.gz" | cut -f1)"
   ok "vLLM venv snapshot exists ($size)"
-  if tar -tf "$PERSIST/vllm.tar.gz" >/tmp/vllm-tar-list.$$ 2>/tmp/vllm-tar-error.$$; then
+  if tar -tf "$PERSIST_DIR/vllm.tar.gz" >/tmp/vllm-tar-list.$$ 2>/tmp/vllm-tar-error.$$; then
     ok "vLLM venv tar archive readable"
     for needle in \
       'vllm/bin/vllm' \
@@ -168,12 +156,12 @@ if [ -f "$PERSIST/vllm.tar.gz" ]; then
   fi
   rm -f /tmp/vllm-tar-list.$$ /tmp/vllm-tar-error.$$
 else
-  fail "persistent vLLM venv snapshot missing: $PERSIST/vllm.tar.gz"
+  fail "persistent vLLM venv snapshot missing: $PERSIST_DIR/vllm.tar.gz"
 fi
 
 for cache in aiter_cache.tar.gz torch_ext_cache.tar.gz comgr_cache.tar.gz; do
-  if [ -f "$PERSIST/$cache" ]; then
-    if tar -tf "$PERSIST/$cache" >/dev/null 2>&1; then
+  if [ -f "$PERSIST_DIR/$cache" ]; then
+    if tar -tf "$PERSIST_DIR/$cache" >/dev/null 2>&1; then
       ok "$cache exists and is readable"
     else
       fail "$cache exists but archive is unreadable"
@@ -183,19 +171,19 @@ for cache in aiter_cache.tar.gz torch_ext_cache.tar.gz comgr_cache.tar.gz; do
   fi
 done
 
-section "7. Persistent storage headroom"
-df -h /mnt/workspace 2>/dev/null || true
+section "7. Storage headroom"
+df -h "$(dirname "$MODEL_BASE")" 2>/dev/null || df -h /mnt/workspace 2>/dev/null || true
 free -h 2>/dev/null || true
 if [ -d /dev/shm ]; then
   df -h /dev/shm || true
 fi
 
-section "8. GPU-switch readiness"
+section "8. GPU readiness"
 echo "failures: $failures"
 echo "warnings : $warnings"
 if [ "$failures" -ne 0 ]; then
   echo
-  echo "CPU PREFLIGHT FAILED — fix the items above before paying for GPU time."
+  echo "CPU PREFLIGHT FAILED — fix the items above before allocating GPU time."
   exit 1
 fi
 
@@ -203,13 +191,13 @@ echo
 cat <<'EOF'
 CPU PREFLIGHT PASSED.
 
-After switching to the GPU instance:
-  1. Human: run the private infra bootstrap once (establish SSH/tunnels + restore caches).
-  2. Agent: cd /mnt/workspace/deepseek-v4-flash-mi308x && git pull --ff-only
-  3. Agent: python3 scripts/audit_runtime.py
-  4. Agent: start the default dsflash service, then run docs/GPU_VALIDATION_PLAN.md.
+On the GPU host:
+  1. Complete host-specific/bootstrap work outside this public repository.
+  2. Update this checkout with git pull --ff-only.
+  3. Run python3 scripts/audit_runtime.py.
+  4. Optionally stage a complete local hot copy with scripts/stage_model_local.sh.
+  5. Start scripts/02_serve_vllm.sh, then run docs/GPU_VALIDATION_PLAN.md.
 
-Do not reinstall the stable dev306 venv or overwrite it with an upstream dev229
-production-runtime experiment unless audit/recovery proves the persistent stable
-venv is missing or invalid. Any dev229 comparison belongs in a second venv.
+Do not overwrite the validated dev306 environment with an alternate runtime.
+Any dev229 comparison belongs in a second isolated venv.
 EOF
