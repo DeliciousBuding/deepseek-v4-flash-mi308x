@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in contributing to vllm-rocm-dsv4-flash!
+Thanks for your interest in contributing to deepseek-v4-flash-mi308x!
 
 This repository is a production recipe for serving DeepSeek-V4-Flash-0731 on a single AMD Instinct accelerator. Contributions in any of these areas are especially welcome:
 

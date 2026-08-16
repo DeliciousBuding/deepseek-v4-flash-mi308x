@@ -49,7 +49,7 @@ After the human switches to the GPU instance and runs the private bootstrap
 once, the agent must **not reinstall first**.
 
 ```bash
-cd /mnt/workspace/vllm-rocm-dsv4-flash
+cd /mnt/workspace/deepseek-v4-flash-mi308x
 git pull --ff-only
 python3 scripts/audit_runtime.py
 ```

@@ -199,7 +199,7 @@ CPU PREFLIGHT PASSED.
 
 After switching to the GPU instance:
   1. Human: run the private infra bootstrap once (establish SSH/tunnels + restore caches).
-  2. Agent: cd /mnt/workspace/vllm-rocm-dsv4-flash && git pull --ff-only
+  2. Agent: cd /mnt/workspace/deepseek-v4-flash-mi308x && git pull --ff-only
   3. Agent: python3 scripts/audit_runtime.py
   4. Agent: start the default dsflash service, then run docs/GPU_VALIDATION_PLAN.md.
 

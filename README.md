@@ -1,4 +1,4 @@
-# vllm-rocm-dsv4-flash
+# deepseek-v4-flash-mi308x
 
 <div align="center">
 
@@ -89,8 +89,8 @@ benchmarks and sandbox-specific compatibility.
 ### 1. Pin the patch source
 
 ```bash
-git clone https://github.com/DeliciousBuding/vllm-rocm-dsv4-flash.git
-cd vllm-rocm-dsv4-flash
+git clone https://github.com/DeliciousBuding/deepseek-v4-flash-mi308x.git
+cd deepseek-v4-flash-mi308x
 bash scripts/prepare_patch_repo.sh
 ```
 
