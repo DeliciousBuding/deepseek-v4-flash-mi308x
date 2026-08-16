@@ -159,7 +159,7 @@ else
   fail "persistent vLLM venv snapshot missing: $PERSIST_DIR/vllm.tar.gz"
 fi
 
-for cache in aiter_cache.tar.gz torch_ext_cache.tar.gz comgr_cache.tar.gz; do
+for cache in aiter_cache.tar.gz torch_ext_cache.tar.gz comgr_cache.tar.gz triton_cache.tar.gz; do
   if [ -f "$PERSIST_DIR/$cache" ]; then
     if tar -tf "$PERSIST_DIR/$cache" >/dev/null 2>&1; then
       ok "$cache exists and is readable"

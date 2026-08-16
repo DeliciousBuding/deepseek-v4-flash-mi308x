@@ -38,7 +38,7 @@ pinned so a future branch move cannot silently change a reproducible install.
 --kv-offloading-size 12
 --kv-offloading-backend native
 --max-num-seqs 64
---max-num-batched-tokens 4096
+--max-num-batched-tokens 3072
 --long-prefill-token-threshold 1024
 --moe-backend triton
 --enable-expert-parallel
@@ -65,12 +65,12 @@ changing those defaults: `MAX_MODEL_LEN`, `MAX_NUM_SEQS`,
 ## Local long-context validation
 
 | Target | Measured prompt tokens | Total time | Result |
-|---:|---:|---:|---|
-| 50K | 47,505 | 16.7s | pass |
-| 128K | 121,605 | 25.3s | pass |
-| 256K | 243,205 | 52.3s | pass |
-| 384K | 364,805 | 66.2s | pass |
-| 500K | 475,005 | **75.3s** | **pass** |
+| ---: | ---: | ---: | --- |
+| 50K | 47,505 | 15.0s | pass |
+| 128K | 121,605 | 26.4s | pass |
+| 256K | 243,205 | 54.5s | pass |
+| 384K | 364,805 | 71.6s | pass |
+| 500K | 475,005 | **77.3s** | **pass** |
 
 The ladder intentionally shares a prefix, so the later rows are not fresh-prefill
 benchmarks. Supporting a 524,288-token maximum does not allocate 512K KV to each
@@ -82,7 +82,7 @@ upper bound because planner/scheduler structures can still have measurable cost.
 Simple repeated-prefix fixture (~18K-token prefix):
 
 | Scenario | Time |
-|---|---:|
+| --- | ---: |
 | cold | 8.67s |
 | hot | 0.49s |
 | speedup | **17.5x** |
@@ -95,8 +95,9 @@ and tool output after them.
 
 Engine-global Prometheus deltas are diagnostic only because they can include
 concurrent clients. The current 30-turn gate uses each response's
-`usage.prompt_tokens_details.cached_tokens`: **1,030,144 / 1,079,154 = 95.46%**.
-Ordinary hot turns were roughly **0.20–0.36s TTFT**; turns that deliberately append
+`usage.prompt_tokens_details.cached_tokens`: **1,027,596 / 1,076,518 = 95.46%**
+on the promoted 3072 profile. Ordinary hot turns were roughly **0.23–0.38s TTFT**;
+turns that deliberately append
 a large new environment/tool observation rise to ~0.8–0.9s and then recover.
 A previous warm-state trace reached 99.4%; both measurements use the same
 per-request accounting, but the current 30-turn run is the promotion headline.
@@ -110,12 +111,12 @@ provides the explicit comparison mode.
 Current coding-agent gate summary:
 
 | Metric | Current production result |
-|---|---:|
+| --- | ---: |
 | 30-turn per-request cached prompt tokens | **95.46%** |
 | ordinary hot TTFT | **~0.20–0.36s** |
 | average hot-trace decode | **167.3 tok/s** |
-| auto tool-call survival | **100K 5/5; 200K 3/3** |
-| true-cold 200K isolation | **DEGRADED: +~2.1s short TTFT** |
+| auto tool-call survival | **100K 5/5; 200K 3/3; 100K concurrency=4 16/16** |
+| true-cold 200K isolation | **DEGRADED but improved: +1.30 / +1.33 / +1.41s at 3072** |
 
 The repository now contains:
 
@@ -134,21 +135,28 @@ deterministic 200K prefix, so an immediate rerun could turn the long request fro
 ~45s into ~0.6s via APC. `bench_ttft_isolation.py` now prepends a random nonce by
 default, forcing a genuinely cold prefix (`--reuse-prefix` is diagnostic only).
 
-With the production scheduler and the promoted 80-CU tuning tables, a true-cold
-200K run measured **0.05s alone vs 2.12s during prefill (+2.07s)**. This remains a
-known tail-latency issue. Two attempted fixes were rejected: forcing the 1,024
-chunk cap even for a solo long request made the long request slower and the short
-overhead ~+3.08s; adding extra M~1024/1031/1032 GEMM tuning did not solve the
-end-to-end scheduler isolation problem.
+With the old 4,096-token budget, repeatable true-cold samples were about
+**+2.06 / +2.08s** added short-request TTFT (with a +2.95s outlier in the same
+session). The scheduler sweep promoted **3,072**: three independent cold samples
+were **+1.33 / +1.41 / +1.30s**, with a 46.1s long request. Decode and C8 were
+unchanged, while the measured 500K endpoint moved from 75.3s to 77.3s. Tail
+isolation therefore improved materially but still fails the strict +0.5s gate.
+
+A 2,048 budget was rejected: the 200K long request stretched to 51.4–54.1s and
+two samples still varied from +1.16 to +2.98s. Forcing the 1,024 cap even for a
+solo long request was also rejected; it made the long request slower and produced
+about +3.08s added TTFT. Extra M~1024/1031/1032 GEMM rows had large operator wins
+but did not improve the end-to-end isolation objective, so they remain out of the
+production tables.
 
 ## Local concurrency
 
 | Concurrency | Aggregate tok/s | Approx. per-stream tok/s |
-|---:|---:|---:|
-| C1 | **128.9** | 128.9 |
+| ---: | ---: | ---: |
+| C1 | **129.2** | 129.2 |
 | C2 | **235.8** | 117.9 |
-| C4 | **375.3** | 93.8 |
-| C8 | **548.3** | 68.5 |
+| C4 | **375.0** | 93.8 |
+| C8 | **549.6** | 68.7 |
 
 This fixed the initial regression where an early microbenchmark produced only
 ~63 tok/s aggregate at C2 and ~81 at C4. The v2 profile scales monotonically.
@@ -156,13 +164,13 @@ This fixed the initial regression where an early microbenchmark produced only
 ## Local single-stream decode
 
 | Output | Total time incl. TTFT | tok/s incl. TTFT |
-|---:|---:|---:|
-| 128 | ~1.1s | 119.1 |
-| 512 | ~3.6s | **140.8** |
+| ---: | ---: | ---: |
+| 128 | ~1.0–1.1s | 120–125 |
+| 512 | ~3.6s | **141.8** |
 
-A fixed 512-token fixture repeated three more times at **141.4 / 141.4 / 141.3
-tok/s**, with identical DSpark acceptance, so ~141 tok/s is the current stable
-low-concurrency control rather than a one-off wall-clock spike.
+The earlier fixed fixture repeated at **141.4 / 141.4 / 141.3 tok/s**; the
+promoted 3072 profile subsequently measured **141.8 tok/s**. ~141–142 tok/s is
+therefore the current stable low-concurrency range rather than a one-off spike.
 
 ## Current upstream reference (2026-08-16)
 
@@ -171,7 +179,7 @@ Current ryanzhou `main` is commit
 runtime based on vLLM `0.26.1rc1.dev229+g124154a88.rocm723` + AITER 0.1.19:
 
 | Metric | Current public upstream result |
-|---|---:|
+| --- | ---: |
 | uncached C1 prefill | **11.69K tok/s steady** (11.53K median) |
 | static DSpark-7 C1 | 152.6 tok/s aggregate, **158.8 tok/s median per stream** |
 | native non-spec C1 | 67.3 tok/s aggregate |
@@ -203,7 +211,7 @@ They cover the production C1 (`M=7/8`), C8 (`M=56/64`) and long-prefill
 operator gains included ~59–63% latency reduction for key C1 bpreshuffle GEMMs,
 ~16–21% for C1 standard GEMMs, and ~45–78% for several C8/prefill standard
 GEMMs. End-to-end gains are smaller because GEMM is only part of the request:
-~141.4 tok/s single-stream and 548.3 tok/s C8 are the measured service-level
+~141.8 tok/s single-stream and 549.6 tok/s C8 are the current service-level
 results.
 
 AITER 0.1.19's tuner compare path has a same-process native-extension reload
@@ -212,6 +220,28 @@ old extension registry. Candidate rows that reported "kernel not present" were
 therefore revalidated in a **fresh Python process** before promotion. Only rows
 with numerical PASS and measured production-operator benefit remain in the
 production CSVs.
+
+## Scheduler-budget A/B — 3072 coding-agent default
+
+DSpark K=7 reserves 384 token slots, so the ordinary scheduled budgets are 3,712
+for a 4,096 max-batched-token setting, 2,688 for 3,072, and 1,664 for 2,048.
+Steady-state decode and C8 were essentially unchanged after warm-up:
+
+| max batched | ordinary budget | decode-512 | C8 aggregate | cold 200K long | added short TTFT | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 4096 | 3712 | 141.8 | 549.6 | ~44.5–47.4s | +2.06 / +2.08s stable samples | throughput profile |
+| **3072** | **2688** | **141.8** | **549.6** | **46.1s** | **+1.30 / +1.33 / +1.41s** | **default** |
+| 2048 | 1664 | 141.8 | 549.7 | 51.4–54.1s | +1.16 / +2.98s | reject |
+
+The first 3072 decode request was polluted by inference-time Triton compilation:
+decode-128/decode-512 temporarily fell to 7.3/40.4 tok/s. The immediate rerun
+restored 124.9/141.8, and the EngineCore log explicitly reported JIT kernels. The
+runtime recovery path therefore now persists `/root/.triton` in addition to
+COMGR/torch-extension caches and provides a representative post-start warm-up.
+
+The 3072 candidate also passed the complete product gates used in this session:
+30-turn per-request prefix cache **95.46%**, auto tool 100K **5/5**, auto tool
+200K **3/3**, and auto tool 100K with concurrency=4 **16/16**.
 
 ## Tuning history
 
@@ -234,7 +264,7 @@ C4 177 -> 286, C8 372 -> 446, repeated-prefix speedup ~14x -> 17.5x.
 ### Rejected experiments on dev306
 
 | Experiment | Result | Verdict |
-|---|---|---|
+| --- | --- | --- |
 | FULL_AND_PIECEWISE graph capture through 3712 | cold prefill 2509 vs 3222 tok/s; decode flat; ~+10 GB HBM; slower startup | reject |
 | same capture extended through 3840/4096 | cold prefill 2504 tok/s; decode flat | reject |
 | DSpark K=5 vs K=7 | 121.7 vs 133.5 tok/s at decode-512 | keep K=7 for C1 latency |
@@ -251,7 +281,7 @@ The ordered matrix is in [`GPU_VALIDATION_PLAN.md`](GPU_VALIDATION_PLAN.md):
 1. runtime/patch audit and default-profile correctness regression;
 2. short/100K/200K + concurrent streaming tool parser gates;
 3. reasoning-history policy comparison;
-4. scheduler budget 2048/3072/4096/8192 A/B;
+4. scheduler follow-up only after a material runtime/kernel change; the current 3072/4096 Pareto is already measured;
 5. static DSpark K7 vs native decode at C1/C2/C4/C8, with acceptance metrics;
 6. DSpark x CPU-KV prefix-cache matrix;
 7. 256K/384K/512K configured-bound overhead check;

@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![ROCm](https://img.shields.io/badge/ROCm-7.2-red)](https://rocm.docs.amd.com/)
 [![vLLM](https://img.shields.io/badge/vLLM-dev306-4B32C3)](https://github.com/vllm-project/vllm)
-[![GPU](https://img.shields.io/badge/GPU-gfx942%20%7C%20192GB-ED1C24)]()
+![GPU](https://img.shields.io/badge/GPU-gfx942%20%7C%20192GB-ED1C24)
 
 </div>
 
@@ -28,17 +28,17 @@ correctness gates — not from a single tokens/s microbenchmark.
 Measured on the MI308X profile in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md):
 
 | Metric | Result |
-|---|---:|
+| --- | ---: |
 | Configured context ceiling | **524,288 tokens** |
 | Long-context ladder | **50K / 128K / 256K / 384K / 500K all pass** |
-| 512-token generation incl. TTFT | **~141.4 tok/s** (3 repeated runs: 141.4 / 141.4 / 141.3) |
-| C1 / C2 / C4 / C8 aggregate | **128.9 / 235.8 / 375.3 / 548.3 tok/s** |
-| 500K ladder wall time | **75.3s** for 475,005 prompt tokens + 64 output tokens |
-| 30-turn per-request prefix-cache hit | **95.46%** (1,030,144 / 1,079,154 prompt tokens) |
-| Ordinary hot coding-agent TTFT | **~0.20–0.36s** |
-| Auto tool-call validation | **100K 5/5, 200K 3/3**, no raw DSML leakage |
-| Cold 200K-prefill isolation | **known issue: +~2.1s short-request TTFT** with nonce-forced cold prefix |
-| Same-instance staged model load | **43.0s** after local SSD/page-cache warm-up (169.7s original NFS control) |
+| 512-token generation incl. TTFT | **141.8 tok/s** on the promoted 3072 profile |
+| C1 / C2 / C4 / C8 aggregate | **129.2 / 235.8 / 375.0 / 549.6 tok/s** |
+| 500K ladder wall time | **77.3s** at 3072; **75.3s** at the 4096 throughput profile |
+| 30-turn per-request prefix-cache hit | **95.46%** (1,027,596 / 1,076,518 prompt tokens) |
+| Ordinary hot coding-agent TTFT | **~0.23–0.38s** in the 3072 promotion trace |
+| Auto tool-call validation | **100K 5/5, 200K 3/3, 100K C4 16/16**, no raw DSML leakage |
+| Cold 200K-prefill isolation | **+1.30 / +1.33 / +1.41s** at 3072; still above the +0.5s gate |
+| Same-instance staged model load | **~36–43s** after local SSD/page-cache warm-up (169.7s original NFS control) |
 
 The performance profile now includes **MI308X-specific 80-CU AITER tables**.
 The complete 2026-08-16 experiment trail, including rejected candidates and raw
@@ -145,13 +145,18 @@ python3 scripts/audit_runtime.py
 bash scripts/stage_model_local.sh dsflash
 
 bash scripts/02_serve_vllm.sh dsflash
+
+# In a second shell after /health is ready, cover real first-use JIT paths and
+# persist the validated production venv + compiler caches.
+SNAPSHOT_AFTER_WARMUP=1 bash scripts/warmup_runtime.sh
 ```
 
 `audit_runtime.py` verifies the runtime versions, patch-source revision,
 installed overlays, patched C++ extension, sparse-prefill artifact and restart
-snapshots. Runtime-generated AITER, torch-extension and ROCm COMGR caches are
-warm-start accelerators; `snapshot_runtime_caches.sh` persists them after a
-healthy warm-up.
+snapshots. Runtime-generated AITER, torch-extension, ROCm COMGR and Triton caches
+are warm-start accelerators. `warmup_runtime.sh` covers representative first-use
+paths; `snapshot_runtime_state.sh` atomically replaces the production venv
+snapshot and persists all warm caches.
 
 ## CPU-instance preparation
 
@@ -177,7 +182,7 @@ should be fixed **before paying for GPU time**.
 --kv-offloading-size 12
 --kv-offloading-backend native
 --max-num-seqs 64
---max-num-batched-tokens 4096
+--max-num-batched-tokens 3072
 --long-prefill-token-threshold 1024
 --moe-backend triton
 --enable-expert-parallel
@@ -198,7 +203,7 @@ the validated sandbox exposes only a 16 GB `/dev/shm`.
 ```bash
 MAX_MODEL_LEN=524288
 MAX_NUM_SEQS=64
-MAX_BATCHED_TOKENS=4096
+MAX_BATCHED_TOKENS=3072
 LONG_PREFILL_TOKEN_THRESHOLD=1024
 DSPARK_ENABLED=1
 DSPARK_K=7
@@ -214,11 +219,14 @@ Examples:
 # Native decoder control
 DSPARK_ENABLED=0 bash scripts/02_serve_vllm.sh dsflash
 
-# Scheduler-budget comparison
-MAX_BATCHED_TOKENS=2048 bash scripts/02_serve_vllm.sh dsflash
+# Throughput profile: ~2.7% faster at the measured 500K endpoint, but worse
+# true-cold late-short-request isolation than the 3072 default.
+MAX_BATCHED_TOKENS=4096 bash scripts/02_serve_vllm.sh dsflash
 ```
 
-Defaults stay unchanged until a candidate wins the full agent/correctness matrix.
+The default is the measured **3072 coding-agent latency profile**. 4096 remains
+an explicit throughput profile; 2048 was rejected because it slowed the long
+prefill more while giving unstable isolation results.
 
 ## Coding-agent benchmark suite
 
@@ -287,7 +295,7 @@ Current upstream `main` is the same pinned source commit. Its production README
 reports:
 
 | Metric | Upstream production |
-|---|---:|
+| --- | ---: |
 | Runtime | vLLM dev229 + AITER 0.1.19 |
 | Uncached C1 prefill | **11.69K tok/s steady** (11.53K median) |
 | Static DSpark-7 C1 | 152.6 aggregate / **158.8 median per stream** |
@@ -331,6 +339,10 @@ or kernel stack changes.
 │   └── GPU_VALIDATION_PLAN.md
 ├── patches/
 │   └── shared_offload_region.madvise-tolerant.py
+├── tuning/
+│   ├── README.md
+│   ├── dsv4-mi308x-80cu-a8w8-blockscale-bpreshuffle.csv
+│   └── dsv4-mi308x-80cu-a8w8-blockscale.csv
 └── scripts/
     ├── 00_check_env.sh
     ├── 01_download_model.sh
@@ -342,6 +354,11 @@ or kernel stack changes.
     ├── preflight_cpu.sh
     ├── install_vllm_nightly.sh
     ├── audit_runtime.py
+    ├── stage_model_local.sh
+    ├── warmup_runtime.sh
+    ├── snapshot_runtime_caches.sh
+    ├── snapshot_runtime_state.sh
+    ├── validate_tuning_tables.py
     └── bench/
 ```
 

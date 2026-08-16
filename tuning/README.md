@@ -13,7 +13,7 @@ rows were selected by tuning on the 80-CU device, then checked through the
 production operator with numerical comparison.
 
 Promoted coverage is intentionally small: C1 M=7/8, C8 M=56/64 and M=4096
-prefill shapes with demonstrated end-to-end value. Experimental M~1024 rows
+prefill/throughput-profile shapes with demonstrated end-to-end value. Experimental M~1024 rows
 were not promoted because they did not improve the true-cold 200K request
 isolation benchmark.
 

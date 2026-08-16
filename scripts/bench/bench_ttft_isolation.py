@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
-"""bench_ttft_isolation.py — short-request TTFT during a long prefill.
+"""Measure short-request TTFT while a genuinely cold long prefill is running.
 
-Validates the `--long-prefill-token-threshold` latency isolation: while a
-long prefill occupies the engine, a late short request should still get its
-first token quickly instead of waiting for the whole prefill to finish.
-
-Usage:
-  python3 bench_ttft_isolation.py [long_tokens] [short_tokens]
-Defaults: 200K long prefill, 8-token short request.
+The long prompt gets a nonce in its first cache block by default so repeated runs
+cannot be turned into fake "isolation wins" by automatic prefix caching.
 """
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import secrets
+import statistics
 import threading
 import time
 import urllib.request
+from pathlib import Path
 
-KEY = os.environ.get("VLLM_API_KEY") or open(
-    os.environ.get("VLLM_API_KEY_FILE", "/mnt/workspace/.bootstrap/vllm_api_key")
-).read().strip()
 BASE = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000")
 MODEL = "deepseek-v4-flash"
 
 
-def stream_request(prompt, max_tokens):
+def api_key() -> str:
+    value = os.environ.get("VLLM_API_KEY")
+    if value:
+        return value
+    path = os.environ.get(
+        "VLLM_API_KEY_FILE", "/mnt/workspace/.bootstrap/vllm_api_key"
+    )
+    return Path(path).read_text(encoding="utf-8").strip()
+
+
+def stream_request(prompt: str, max_tokens: int) -> float:
     body = json.dumps({
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -34,71 +40,98 @@ def stream_request(prompt, max_tokens):
     }).encode()
     req = urllib.request.Request(BASE + "/v1/chat/completions", data=body, headers={
         "Content-Type": "application/json",
-        "Authorization": "Bearer " + KEY,
+        "Authorization": "Bearer " + api_key(),
     })
     t0 = time.time()
-    first = None
     with urllib.request.urlopen(req, timeout=1800) as resp:
-        for line in resp:
-            line = line.decode("utf-8", "ignore").strip()
+        for raw in resp:
+            line = raw.decode("utf-8", "ignore").strip()
             if line.startswith("data:") and line[5:].strip() != "[DONE]":
-                if first is None:
-                    first = time.time()
-                    break  # only need TTFT
-    return first - t0 if first else None
+                return time.time() - t0
+    raise RuntimeError("stream ended before the first response chunk")
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("long_tokens", nargs="?", type=int, default=200000)
-    ap.add_argument("short_tokens", nargs="?", type=int, default=8)
-    ap.add_argument(
-        "--reuse-prefix",
-        action="store_true",
-        help="reuse the deterministic long prefix (cache diagnostic only); default forces a cold prefix",
+def run_once(
+    long_tokens: int,
+    short_tokens: int,
+    *,
+    reuse_prefix: bool,
+    inject_after: float,
+) -> tuple[float, float, float, float]:
+    unit = (
+        "The software engineering coding standards mandate camelCase for "
+        "function names, snake_case for variable names, explicit error "
+        "handling, single responsibility, dependency injection. "
     )
-    args = ap.parse_args()
-    long_tokens = args.long_tokens
-    short_tokens = args.short_tokens
-    unit = ("The software engineering coding standards mandate camelCase for "
-            "function names, snake_case for variable names, explicit error "
-            "handling, single responsibility, dependency injection. ")
-    # Prefix caching makes an immediate rerun look artificially perfect. Put a
-    # nonce in the *first* block by default so every measurement exercises a
-    # genuinely cold long prefill. --reuse-prefix is intentionally diagnostic.
-    nonce = "" if args.reuse_prefix else f"cold-isolation-{secrets.token_hex(8)}: "
+    nonce = "" if reuse_prefix else f"cold-isolation-{secrets.token_hex(8)}: "
     long_prompt = nonce + unit * max(1, long_tokens // 40)
 
-    # Baseline: short request alone (no competing prefill)
-    t0 = time.time()
     ttft_alone = stream_request("Say ok.", short_tokens)
-    print(f"short TTFT alone:        {ttft_alone:.2f}s (total {time.time()-t0:.2f}s)")
+    result: dict[str, float] = {}
 
-    # Start the long prefill, then inject the short request 1.5s later
-    result = {}
-
-    def long_worker():
+    def long_worker() -> None:
         t0 = time.time()
         stream_request(long_prompt, short_tokens)
         result["long_total"] = time.time() - t0
 
     thread = threading.Thread(target=long_worker)
     thread.start()
-    time.sleep(1.5)
-    t0 = time.time()
+    time.sleep(inject_after)
     ttft_late = stream_request("Say ok.", short_tokens)
-    result["short_late"] = time.time() - t0
     thread.join()
 
-    print(f"long prefill total:      {result['long_total']:.1f}s "
-          f"(~{long_tokens} tokens)")
-    print(f"short TTFT during prefill: {ttft_late:.2f}s")
-    print()
+    long_total = result["long_total"]
     overhead = ttft_late - ttft_alone
-    print(f"isolation overhead:      {overhead:+.2f}s vs alone")
-    verdict = "OK" if ttft_late <= ttft_alone + 0.5 else "DEGRADED"
-    print(f"verdict:                 {verdict} (threshold: <= alone + 0.5s)")
+    return ttft_alone, long_total, ttft_late, overhead
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("long_tokens", nargs="?", type=int, default=200000)
+    ap.add_argument("short_tokens", nargs="?", type=int, default=8)
+    ap.add_argument("--rounds", type=int, default=1, help="independent cold rounds")
+    ap.add_argument("--inject-after", type=float, default=1.5, metavar="SECONDS")
+    ap.add_argument("--max-added-ttft", type=float, default=0.5, metavar="SECONDS")
+    ap.add_argument(
+        "--reuse-prefix",
+        action="store_true",
+        help="reuse the deterministic long prefix (cache diagnostic only)",
+    )
+    args = ap.parse_args()
+    if args.rounds < 1:
+        ap.error("--rounds must be >= 1")
+    if args.inject_after < 0:
+        ap.error("--inject-after must be >= 0")
+
+    samples: list[tuple[float, float, float, float]] = []
+    for idx in range(1, args.rounds + 1):
+        alone, long_total, late, overhead = run_once(
+            args.long_tokens,
+            args.short_tokens,
+            reuse_prefix=args.reuse_prefix,
+            inject_after=args.inject_after,
+        )
+        samples.append((alone, long_total, late, overhead))
+        print(
+            f"round {idx:02d}: alone={alone:.2f}s long={long_total:.1f}s "
+            f"late={late:.2f}s added={overhead:+.2f}s"
+        )
+
+    long_totals = [x[1] for x in samples]
+    overheads = [x[3] for x in samples]
+    median_overhead = statistics.median(overheads)
+    max_overhead = max(overheads)
+    print()
+    print(f"long prefill median:     {statistics.median(long_totals):.1f}s (~{args.long_tokens} tokens)")
+    print(f"isolation median added:  {median_overhead:+.2f}s")
+    print(f"isolation max added:     {max_overhead:+.2f}s")
+    verdict = "OK" if max_overhead <= args.max_added_ttft else "DEGRADED"
+    print(
+        f"verdict:                 {verdict} "
+        f"(all rounds <= +{args.max_added_ttft:.2f}s)"
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

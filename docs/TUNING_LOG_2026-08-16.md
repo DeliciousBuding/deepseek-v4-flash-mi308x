@@ -34,7 +34,7 @@ expensive because runtime-generated compiler caches were absent.
 Observed first-start components:
 
 | Component | First observed time |
-|---|---:|
+| --- | ---: |
 | target model weight load | ~104.3s |
 | DSpark draft weight load | ~61.8s |
 | total model load | ~169.7s |
@@ -57,7 +57,7 @@ Before changing AITER tables, the service was healthy and passed basic API and
 long-context checks. Representative same-session measurements were:
 
 | Metric | Untuned control |
-|---|---:|
+| --- | ---: |
 | decode-512 | ~128.9-139.3 tok/s depending on fixture/warm state |
 | C1 aggregate | 117.7 tok/s |
 | C2 aggregate | 235.5 tok/s |
@@ -134,7 +134,7 @@ focused on `M=7/8`.
 ### 6.1 bpreshuffle examples
 
 | Shape `(M,N,K)` | Default | Tuned | Result |
-|---|---:|---:|---:|
+| --- | ---: | ---: | ---: |
 | `(8,4096,4096)` | 31.11 us | 12.13 us | ~61.0% lower latency |
 | `(8,4096,8192)` | 58.31 us | 21.59 us | ~63.0% lower latency |
 | `(8,32768,1024)` | 36.06 us | 14.87 us | ~58.8% lower latency |
@@ -157,7 +157,7 @@ expected: low concurrency improved while higher concurrency stayed effectively
 flat.
 
 | Metric | Before | C1-tuned |
-|---|---:|---:|
+| --- | ---: | ---: |
 | decode-128 | 113.9 | 118.8 tok/s |
 | decode-512 | 128.9 | 140.7 tok/s |
 | C1 | 117.7 | 128.3 tok/s |
@@ -202,7 +202,7 @@ large prefill path.
 Representative bpreshuffle fresh-process results:
 
 | Shape | Default | Tuned | Approx. improvement |
-|---|---:|---:|---:|
+| --- | ---: | ---: | ---: |
 | `M56,4096x4096` | 34.45 us | 22.02 us | ~36% |
 | `M56,4096x8192` | 64.34 us | 39.54 us | ~39% |
 | `M64,4096x8192` | 43.38 us | 38.39 us | ~11.5% |
@@ -212,7 +212,7 @@ Representative bpreshuffle fresh-process results:
 Representative standard A8W8 results were larger:
 
 | Shape | Default | Tuned | Approx. improvement |
-|---|---:|---:|---:|
+| --- | ---: | ---: | ---: |
 | `M4096,1536x4096` | 941 us | 222 us | ~76% |
 | `M4096,4096x2048` | 1308 us | 302 us | ~77% |
 | `M4096,4096x12288` | 7128 us | 1569 us | ~78% |
@@ -244,7 +244,7 @@ Explicit AITER config environment variables remain an override.
 The full service profile produced:
 
 | Metric | Result |
-|---|---:|
+| --- | ---: |
 | decode-128 | 119.1 tok/s |
 | decode-512 | 140.8 tok/s |
 | repeated fixed decode-512 | 141.4 / 141.4 / 141.3 tok/s |
@@ -263,7 +263,7 @@ the end-to-end path.
 The promoted profile passed the complete context ladder:
 
 | Target | Actual prompt tokens | Wall time | Result |
-|---:|---:|---:|---|
+| ---: | ---: | ---: | --- |
 | 50K | 47,505 | 16.7s | PASS |
 | 128K | 121,605 | 25.3s | PASS |
 | 256K | 243,205 | 52.3s | PASS |
@@ -326,14 +326,13 @@ Persistent model weights live on NFS. A complete ephemeral copy was staged to:
 /root/models/deepseek-ai/DeepSeek-V4-Flash-0731
 ```
 
-The staging script copies to a temporary directory, compares a complete filename
-+ size inventory, checks all 48 shards and key metadata, then renames atomically.
+The staging script copies to a temporary directory, compares a complete filename + size inventory, checks all 48 shards and key metadata, then renames atomically.
 The launcher only auto-selects the hot copy when it is complete.
 
 Observed model-load progression:
 
 | State | Target | Draft | Total model load |
-|---|---:|---:|---:|
+| --- | ---: | ---: | ---: |
 | original NFS | ~104.3s | ~61.8s | ~169.7s |
 | first local staged run | 97.5s | 20.1s | 121.1s |
 | warmer local/page-cache run | 84.8s | 3.69s | 92.0s |
@@ -404,19 +403,130 @@ The extra 1K rows are therefore **not in the production CSVs**. Operator speedup
 alone is insufficient reason to enlarge the production configuration when the
 end-to-end objective does not improve.
 
-## 16. What remains worth tuning
+## 16. Scheduler-budget sweep and the 3,072 promotion
+
+The next controlled variable was `max_num_batched_tokens`. DSpark K=7 reserves
+384 token slots, so the effective ordinary scheduled-token budgets were 3,712,
+2,688 and 1,664 for the 4,096 / 3,072 / 2,048 launcher settings respectively.
+All other production variables stayed fixed.
+
+### 16.1 4,096 control
+
+The clean repository-default service (before promotion) reproduced the tuned
+throughput baseline:
+
+```text
+decode-512              141.8 tok/s
+C1/C2/C4/C8             129.3 / 235.8 / 375.1 / 549.6 tok/s
+```
+
+Three true-cold 200K isolation samples in the same session were:
+
+```text
+sample 1: long 47.4s, added short TTFT +2.95s  (outlier)
+sample 2: long 44.6s, added short TTFT +2.06s
+sample 3: long 44.5s, added short TTFT +2.08s
+```
+
+The two stable samples confirm the earlier ~+2.1s finding; the outlier also shows
+why a single injection timing is not a sufficient scheduler gate.
+
+### 16.2 3,072 candidate
+
+The first decode measurement after the 3,072 restart was **not** a valid steady-
+state result: decode-128 / decode-512 fell to 7.3 / 40.4 tok/s while the EngineCore
+log explicitly reported inference-time Triton JIT for sparse/indexing/DSpark
+kernels. The immediate repeat was 124.9 / **141.8 tok/s**, and C8 was **549.6
+tok/s**. This directly motivated the post-start warm-up and Triton cache snapshot
+added later in the session.
+
+Three independent true-cold 200K isolation samples were tightly grouped:
+
+```text
+long 46.1s, added short TTFT +1.33s
+long 46.1s, added short TTFT +1.41s
+long 46.1s, added short TTFT +1.30s
+```
+
+The full context ladder at 3,072 was:
+
+| Target | Prompt tokens | Wall time | Result |
+| ---: | ---: | ---: | --- |
+| 50K | 47,505 | 15.0s | PASS |
+| 128K | 121,605 | 26.4s | PASS |
+| 256K | 243,205 | 54.5s | PASS |
+| 384K | 364,805 | 71.6s | PASS |
+| 500K | 475,005 | **77.3s** | PASS |
+
+Compared with the prior 75.3s 4,096 endpoint, the measured 500K cost is ~2.7%,
+while the stable late-short-request penalty falls by roughly one third. The
+interactive coding-agent profile therefore prefers 3,072; 4,096 remains useful
+as an explicit throughput profile.
+
+The 3,072 candidate then passed the higher-level promotion gates:
+
+```text
+30-turn cache          95.46% = 1,027,596 / 1,076,518 prompt tokens
+100K auto tool         5/5 PASS; hot median tool TTFT 0.527s
+200K auto tool         3/3 PASS; hot median tool TTFT 0.863s
+100K auto, C=4         16/16 PASS; tool TTFT median 0.796s
+```
+
+No raw DSML/tool-parser leakage was observed.
+
+### 16.3 2,048 candidate
+
+Steady decode/C8 again stayed flat (141.8 / 549.7 tok/s), but the cold long request
+stretched to 54.1s and 51.4s in two samples. Added short-request latency was
++2.98s and +1.16s: both slower overall and much less stable than 3,072. It was
+rejected without spending more GPU time trying to make the matrix look prettier.
+
+### 16.4 Why no prompt-specific 2,688 GEMM table was added
+
+The 3,072 setting yields an ordinary scheduler budget of 2,688, but runtime AITER
+miss logs did **not** show one stable `M=2688` GEMM. The larger misses were routed
+MoE-dependent M values such as 1,131 / 1,216 / 1,669 / 1,809. Tuning those exact
+sizes from one synthetic prompt would overfit the benchmark rather than the
+production workload, so no such rows were promoted.
+
+## 17. First-request JIT and restart-state cleanup
+
+The scheduler sweep exposed compiler state that vLLM's built-in warm-up did not
+cover. After a representative first request, the runtime had:
+
+```text
+/root/.triton                 ~185 MB
+/root/.cache/comgr            ~612 MB
+/root/.cache/torch_extensions ~17 MB
+/root/.aiter                  tiny compatibility cache
+```
+
+The recovery design was expanded accordingly:
+
+- `warmup_runtime.sh` exercises representative DSpark decode plus a short forced
+  tool/prefill path after `/health` is ready;
+- `snapshot_runtime_caches.sh` now persists Triton + COMGR + torch extensions +
+  optional AITER cache;
+- `snapshot_runtime_state.sh` atomically snapshots the **current production
+  venv** and then all runtime caches, so a tuned AITER registry is not replaced
+  on reboot by an older experimental snapshot.
+
+This is operational tuning, not just startup cosmetics: the first 3,072 decode
+measurement demonstrated that missing first-use JIT can turn a normal 141 tok/s
+request into a temporary 40 tok/s request.
+
+## 18. What remains worth tuning
 
 The next useful work is above the already-promoted GEMM layer:
 
-1. scheduler-budget A/B (`4096`, `3072`, `2048`) using the nonce-forced cold
-   isolation benchmark, while also recording C1/C8 and long-prefill throughput;
-2. investigate why a late short request can still wait ~2s behind an already
-   dispatched cold-prefill chunk;
-3. profile attention/MoE/scheduler time after the M=4096 GEMMs became much
-   faster; the long-prompt engine throughput is now limited elsewhere;
+1. investigate why a late short request can still wait ~1.3s behind an already
+   dispatched 3,072-profile cold-prefill iteration;
+2. profile attention/MoE/scheduler time after the large GEMMs became much faster;
+3. avoid exact-M overfitting to prompt-dependent MoE routed sizes unless a broad
+   real workload proves that they recur;
 4. keep tool/parser, 500K, cache and restart gates mandatory for every candidate.
 
-## 17. Promotion policy used in this session
+## 19. Promotion policy used in this session
 
 A tuning row or runtime change was promoted only if the relevant checks passed:
 

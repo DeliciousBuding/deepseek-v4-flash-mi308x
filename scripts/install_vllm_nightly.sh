@@ -193,13 +193,8 @@ echo "===== [10/10] validate + persist restart snapshots ====="
 "$PY" -c 'import importlib.metadata as m; import aiter; print("AITER", m.version("amd-aiter"))'
 "$PY" -c 'import flydsl; from aiter.ops.flydsl import is_flydsl_available; assert flydsl.__version__.startswith("0.2.4"), flydsl.__version__; assert is_flydsl_available(); print("flydsl", flydsl.__version__, "OK")'
 
-mkdir -p /mnt/workspace/.venvs
-echo "snapshotting venv to persistent storage ..."
-tar -cf /mnt/workspace/.venvs/vllm.tar.gz -C "$(dirname "$VENV")" "$(basename "$VENV")"
-echo "  ✓ /mnt/workspace/.venvs/vllm.tar.gz ($(du -sh /mnt/workspace/.venvs/vllm.tar.gz | cut -f1))"
-
-echo "snapshotting runtime-generated caches (if already warm) ..."
-bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/snapshot_runtime_caches.sh"
+echo "snapshotting install-time runtime state ..."
+bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/snapshot_runtime_state.sh"
 
 echo ""
 echo "=============================================="

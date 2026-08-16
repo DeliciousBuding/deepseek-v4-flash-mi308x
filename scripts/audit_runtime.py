@@ -208,6 +208,8 @@ def main() -> int:
         (Path("/mnt/workspace/.venvs/torch_ext_cache.tar.gz"), "persistent torch_extensions snapshot"),
         (Path("/root/.cache/comgr"), "ROCm COMGR runtime cache"),
         (Path("/mnt/workspace/.venvs/comgr_cache.tar.gz"), "persistent ROCm COMGR snapshot"),
+        (Path("/root/.triton"), "Triton runtime cache"),
+        (Path("/mnt/workspace/.venvs/triton_cache.tar.gz"), "persistent Triton snapshot"),
     ]:
         print(f"{'OK' if path.exists() else 'WARN'} {label}")
         if not path.exists():

@@ -18,7 +18,7 @@ native CPU KV tier   12 GB
 block size           256
 prefix caching       enabled
 max_num_seqs         64
-max_batched_tokens   4096
+max_batched_tokens   3072
 long prefill cap     1024
 DSpark                K=7, probabilistic draft, block rejection
 cudagraph             disabled
@@ -33,13 +33,13 @@ same patch source != byte-identical serving runtime.
 Last local control measurements:
 
 ```text
-512-token generation incl. TTFT    ~141.4 tok/s
-C1/C2/C4/C8 aggregate              128.9 / 235.8 / 375.3 / 548.3 tok/s
-50K -> 500K ladder                 all pass (500K: 75.3s wall time)
-30-turn per-request cached tokens  95.46% (1,030,144 / 1,079,154)
+512-token generation incl. TTFT    141.8 tok/s
+C1/C2/C4/C8 aggregate              129.2 / 235.8 / 375.0 / 549.6 tok/s
+50K -> 500K ladder                 all pass (500K: 77.3s at 3072; 75.3s at 4096)
+30-turn per-request cached tokens  95.46% (1,027,596 / 1,076,518)
 hot agent TTFT                     ~0.20-0.36s ordinary hot turns
-auto tool roundtrip                100K 5/5; 200K 3/3
-true-cold 200K isolation           KNOWN DEGRADED: +~2.1s short TTFT
+auto tool roundtrip                100K 5/5; 200K 3/3; 100K C4 16/16
+true-cold 200K isolation           KNOWN DEGRADED: +1.30 / +1.33 / +1.41s at 3072
 ```
 
 ## Phase 0 — runtime integrity before serving
@@ -56,7 +56,7 @@ python3 scripts/audit_runtime.py
 The audit must have **zero correctness/provenance failures**. It verifies the
 pinned vLLM/AITER/flydsl versions, upstream patch commit, installed overlay
 hashes, top-k binary, sparse-prefill module, JIT source, and the persistent venv
-snapshot. Runtime-generated AITER/torch/ROCm-COMGR caches are warm-start accelerators: a
+snapshot. Runtime-generated AITER/torch/ROCm-COMGR/Triton caches are warm-start accelerators: a
 fresh host may warn when they are absent, but that does not block the first
 controlled warm-up.
 
@@ -71,7 +71,7 @@ Start with **no environment overrides**. Warm the runtime once, then run:
 python3 scripts/bench/bench_full.py all
 python3 scripts/bench/bench_agent_trace.py 30 20000
 python3 scripts/bench/bench_session_concurrency.py --sessions 4 --rounds 8
-python3 scripts/bench/bench_ttft_isolation.py 200000  # random prefix nonce => true cold prefill
+python3 scripts/bench/bench_ttft_isolation.py 200000 --rounds 3  # nonce-forced true-cold samples
 
 # tool protocol: short prefix / forced tool
 python3 scripts/bench/bench_tool_roundtrip.py --rounds 10 --mode forced --prefix-tokens 20000
@@ -83,20 +83,20 @@ python3 scripts/bench/bench_tool_roundtrip.py --rounds 8 --mode auto --prefix-to
 # parser state under concurrent streaming
 python3 scripts/bench/bench_tool_roundtrip.py --rounds 16 --mode auto --prefix-tokens 100000 --concurrency 4
 
-# The first real GPU run may create AITER/torch JIT caches. Persist them only
-# after the control profile is healthy so the next restart is warm and auditable.
-bash scripts/snapshot_runtime_caches.sh
+# Cover first-use Triton/DSpark paths, then atomically persist the validated
+# production venv plus AITER/torch/COMGR/Triton caches.
+SNAPSHOT_AFTER_WARMUP=1 bash scripts/warmup_runtime.sh
 python3 scripts/audit_runtime.py
 ```
 
 Minimum promotion gates:
 
 | Gate | Requirement |
-|---|---|
+| --- | --- |
 | engine | no EngineCore death / restart |
 | long context | 50K, 128K, 256K, 384K, 500K complete |
-| 512-token single stream | >= 134 tok/s incl. TTFT (~5% band from 141.4) |
-| C8 aggregate | >= 521 tok/s (~5% band from 548.3) |
+| 512-token single stream | >= 134 tok/s incl. TTFT (~5% band from 141.8) |
+| C8 aggregate | >= 522 tok/s (~5% band from 549.6) |
 | warm agent cache | >= 95% by **per-request** cached prompt tokens |
 | tool short-prefix | 10/10 valid round trips |
 | tool 100K auto | 10/10, no raw DSML in content |
@@ -128,20 +128,14 @@ actual upstream harness explicitly replays reasoning tokens.
 
 ## Phase 3 — scheduler-budget Pareto sweep
 
-vLLM's current optimization guide treats `max_num_batched_tokens` as a real
-latency/throughput tradeoff: smaller budgets generally protect decode/ITL,
-while larger budgets give prefill more work per iteration and can improve TTFT
-or throughput. Upstream ryanzhou production itself currently uses a 4,096-token
-budget with capacity reserved for speculative work, so our 4,096 default is not
-an obvious mismatch.
-
-Compare:
+The 2026-08-16 sweep already promoted **3,072** as the coding-agent default.
+4,096 remains the measured throughput profile; 2,048 was rejected. Re-run this
+phase only after a material runtime/kernel change, using the same multi-round
+true-cold isolation method.
 
 ```text
-MAX_BATCHED_TOKENS=2048
-MAX_BATCHED_TOKENS=3072
-MAX_BATCHED_TOKENS=4096   # control
-MAX_BATCHED_TOKENS=8192
+MAX_BATCHED_TOKENS=3072   # current default, ordinary DSpark budget 2688
+MAX_BATCHED_TOKENS=4096   # throughput profile, ordinary DSpark budget 3712
 ```
 
 Keep fixed:
@@ -202,7 +196,7 @@ interaction must be tested explicitly after restart.
 Run the agent trace and 4-session trace for all four combinations:
 
 | DSpark | CPU KV | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | on | 12 GB | production control |
 | off | 12 GB | isolate speculative KV groups |
 | on | off | isolate CPU tier |
