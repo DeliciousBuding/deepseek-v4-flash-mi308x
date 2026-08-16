@@ -96,7 +96,7 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
   find /dev/shm -maxdepth 1 -type f -name 'vllm_offload_*.mmap' -delete 2>/dev/null || true
 
   echo "启动 DeepSeek-V4-Flash-0731 (patch stack: prefix cache + DSpark-7 + sparse MLA)"
-  # ryanhou 生产栈环境变量(对应 compose.yaml):
+  # ryanzhou 生产栈环境变量(对应 compose.yaml):
   #   OPUS_PREFILL=1 → 用预编译的稀疏 prefill 内核(module_pa_sparse_prefill_opus942.so)
   #   SKINNY_GEMM=0  → 关 skinny GEMM(该 shape 在 gfx942 有精度问题)
   #   AITER_CONFIG    → A8W8 blockscale GEMM 调优表
@@ -105,12 +105,21 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
   export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE="${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE:-$PATCH_REPO_DIR/tuning/dsv4-mi300x-a8w8-blockscale-bpreshuffle-ck.batch4096.csv}"
   export AITER_CONFIG_GEMM_A8W8_BLOCKSCALE="${AITER_CONFIG_GEMM_A8W8_BLOCKSCALE:-$PATCH_REPO_DIR/tuning/dsv4-a8w8-blockscale-tuned-gemm.mi300x.decode-candidate.csv}"
 
-  # CPU KV offload (P7): 与 ryanzhou 生产对齐 —— GPU 池用 --kv-cache-memory-bytes
-  # 固定 16GB, 溢出的 KV 经 native 后端落到 CPU 层。单靠 --kv-offloading-size
-  # 而不 pin --kv-cache-memory-bytes 会把 GPU 池压到 8.1GB 装不下 512K(已实测回退)。
-  # 注意: 沙箱 /dev/shm 只有 16GB 且不可扩容, offload 文件落在 /dev/shm,
-  #       所以 CPU 层默认 12GB(留余量), 而非 ryanzhou 生产机的 96GB。
-  # A/B 开关: KV_OFFLOAD_GB=0 关闭 offload; 正数 = CPU 层 GB 数。
+  # Production defaults. Every performance-sensitive scheduling knob is an env
+  # override so benchmarks can A/B without editing this file. Defaults preserve
+  # the MI308X v2 baseline measured on this repository.
+  MAX_MODEL_LEN="${MAX_MODEL_LEN:-524288}"
+  MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
+  MAX_BATCHED_TOKENS="${MAX_BATCHED_TOKENS:-4096}"
+  LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-1024}"
+  GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.95}"
+  MOE_BACKEND="${MOE_BACKEND:-triton}"
+
+  # CPU KV offload: GPU pool is explicitly pinned; excess KV spills to the
+  # native CPU tier. Offload without a pinned GPU pool previously shrank the
+  # GPU pool to ~8.1 GB and could not admit a 512K request.
+  # This sandbox exposes only 16 GB /dev/shm, so default CPU tier is 12 GB.
+  # A/B: KV_OFFLOAD_GB=0 disables the CPU tier while leaving other defaults.
   KV_OFFLOAD_GB="${KV_OFFLOAD_GB:-12}"
   KV_CACHE_BYTES="${KV_CACHE_BYTES:-16000000000}"
   EXTRA_ARGS=()
@@ -123,18 +132,30 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
     echo "[kv-offload] disabled (GPU-only)"
   fi
 
-  # CUDA graph 捕获(可选, 默认关): ryanzhou 生产用 FULL_AND_PIECEWISE + 显式捕获
-  # 尺寸表。注意: 上游捕获上限 3712 对应 block-16 布局; 我们 block-size=256,
-  # chunked prefill 的 chunk 正好是 4096, 因此追加 3840/4096 让 prefill 图命中。
-  # 代价 ~+6GB 显存 + 启动编译时间。
+  # CUDA graph capture is intentionally OFF by default. It was A/B tested with
+  # the upstream capture table and again with 3840/4096 added; both variants
+  # reduced cold-prefill throughput on the pinned dev306 stack. Keep this gate
+  # only for future runtime comparisons.
   if [ "${CUDAGRAPH:-0}" = "1" ]; then
     EXTRA_ARGS+=(--compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256,272,288,304,320,336,352,368,384,400,416,432,448,464,480,496,512,1664,2048,3072,3712,3840,4096],"max_cudagraph_capture_size":4096}')
-    echo "[cudagraph] FULL_AND_PIECEWISE (capture to M=4096)"
+    echo "[cudagraph] FULL_AND_PIECEWISE (experimental; capture to M=4096)"
   fi
 
-  # 场景: 50K-500K 多轮长对话 agent coding, input 多 output 少, 高 cache 命中
+  # DSpark is a latency optimization for the low-concurrency coding-agent path.
+  # DSPARK_ENABLED=0 provides a clean no-spec baseline without editing the script.
+  DSPARK_ENABLED="${DSPARK_ENABLED:-1}"
   DSPARK_K="${DSPARK_K:-7}"
-  echo "[dspark] K=${DSPARK_K}"
+  SPEC_ARGS=()
+  if [ "$DSPARK_ENABLED" = "1" ]; then
+    SPEC_ARGS+=(--speculative-config "{\"method\":\"dspark\",\"num_speculative_tokens\":${DSPARK_K},\"draft_sample_method\":\"probabilistic\",\"rejection_sample_method\":\"block\"}")
+    echo "[dspark] enabled K=${DSPARK_K} (probabilistic + block rejection)"
+  else
+    echo "[dspark] disabled (native decode baseline)"
+  fi
+
+  echo "[scheduler] max_model_len=${MAX_MODEL_LEN} max_num_seqs=${MAX_NUM_SEQS} max_batched_tokens=${MAX_BATCHED_TOKENS} long_prefill_cap=${LONG_PREFILL_TOKEN_THRESHOLD}"
+  echo "[runtime] gpu_memory_utilization=${GPU_MEMORY_UTILIZATION} moe_backend=${MOE_BACKEND}"
+
   exec vllm serve "$MODEL_PATH" \
     --served-model-name deepseek-v4-flash \
     --trust-remote-code \
@@ -143,11 +164,11 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
     --kv-cache-dtype fp8_ds_mla \
     --block-size 256 \
     --enable-prefix-caching \
-    --max-model-len 524288 \
-    --max-num-seqs "${MAX_NUM_SEQS:-64}" \
-    --max-num-batched-tokens 4096 \
-    --long-prefill-token-threshold 1024 \
-    --moe-backend triton \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --max-num-seqs "$MAX_NUM_SEQS" \
+    --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
+    --long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD" \
+    --moe-backend "$MOE_BACKEND" \
     --linear-backend auto \
     --enable-expert-parallel \
     --tokenizer-mode deepseek_v4 \
@@ -155,21 +176,22 @@ elif [ "$MODEL_KEY" = "dsflash" ]; then
     --tool-call-parser deepseek_v4 \
     --enable-auto-tool-choice \
     --enable-prompt-tokens-details \
-    --speculative-config "{\"method\":\"dspark\",\"num_speculative_tokens\":${DSPARK_K},\"draft_sample_method\":\"probabilistic\",\"rejection_sample_method\":\"block\"}" \
-    --gpu-memory-utilization 0.95 \
+    "${SPEC_ARGS[@]}" \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     "${EXTRA_ARGS[@]}" \
     --api-key "$VLLM_API_KEY" \
     --host "$HOST" --port "$PORT"
-  # 说明:
-  #   - 0731 用 DSpark(不是 MTP): method=dspark (method=mtp 会 KeyError)
-  #   - 崩溃修复 + 提速全依赖 install_vllm_nightly.sh 套的 ryanhou 补丁栈(topk 空集 .so + 稀疏 MLA + AITER 调优表)
-  #   - gpu-memory-utilization 0.95: 512K 单请求需 8.94GB KV, 0.92 只剩 8.1GB 装不下
-  #   - 对齐 ryanzhou 生产配置(2026-08-16): --moe-backend triton(Triton OGS 处理 MXFP4 experts)
-  #     + draft-sample-method=probabilistic + rejection-sample-method=block(DSpark 生产路径)
-  #     + --long-prefill-token-threshold 1024(TTFT 隔离) + max-num-batched-tokens 4096
-  #     + reasoning-parser/auto-tool-choice(agent 协议)
-  #   - 未启用(留待验证): --kv-cache-memory-bytes 16G + --kv-offloading-size 96(CPU offload, 之前 64 失败)
-  #     + --compilation-config cudagraph FULL_AND_PIECEWISE(图捕获)
+
+  # Validated production defaults (2026-08-16):
+  #   - max-model-len=524288: 50K→500K ladder passes; short requests allocate
+  #     only the blocks they actually use, while the upper bound remains 512K.
+  #   - GPU KV 16 GB + native CPU KV 12 GB: stable on the 16 GB /dev/shm sandbox.
+  #   - DSpark K=7, probabilistic drafting + block rejection: best tested C1 latency.
+  #   - 4096 scheduler budget + 1024 long-prefill cap: current local Pareto point;
+  #     use MAX_BATCHED_TOKENS to compare 2048/3072/4096/8192 on real agent traces.
+  #   - CUDAGRAPH=0: both capture-table experiments were slower on dev306.
+  #   - Dynamic speculative schedules are intentionally not enabled here until
+  #     compatibility with this pinned DSpark runtime is validated on GPU.
 
 else
   echo "未知模型: $MODEL_KEY (可选 qwen38|qwen36|dsflash)"; exit 1
