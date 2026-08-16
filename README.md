@@ -242,6 +242,7 @@ scripts/bench/
 ├── bench_agent_trace.py           one growing agent; per-request cache accounting
 ├── bench_session_concurrency.py   N independent long-lived agent histories
 ├── bench_high_concurrency.py      clean C32/C64 DSpark-vs-native boundary
+├── bench_configured_ceiling.py    cold 8K/32K/100K MAX_MODEL_LEN comparison
 ├── bench_tool_roundtrip.py        streamed tool call -> tool result -> final answer
 ├── bench_ttft_isolation.py        short request injected during long prefill
 └── collect_shapes.py              runtime/GEMM shape helper

@@ -248,6 +248,16 @@ MAX_MODEL_LEN=393216
 MAX_MODEL_LEN=524288   # required production ceiling
 ```
 
+After each clean restart, run the cache-isolated fixture with the matching
+profile label:
+
+```bash
+python3 scripts/bench/bench_configured_ceiling.py \
+  --profile-label "$MAX_MODEL_LEN" \
+  --prompt-tokens 8000 32000 100000 \
+  --samples 2
+```
+
 Use identical 8K / 32K / 100K prompts and compare startup time, TTFT, decode,
 HBM high-water and admitted concurrency. Keep 524,288 unless it produces a real
 short-request regression that is large enough to justify a more complex serving
