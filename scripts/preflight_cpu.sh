@@ -15,7 +15,7 @@
 #   MODEL_BASE=/mnt/workspace/models
 #   WHEELS=/mnt/workspace/wheels
 #   PATCH_REPO=/mnt/workspace/deepseek-v4-flash-mi300x
-#   PREPARE_PATCH_REPO=1   # default: pin/fetch historical source revision
+#   PREPARE_PATCH_REPO=1   # default: pin exact upstream source revision
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -63,7 +63,6 @@ while IFS= read -r -d '' shfile; do
   fi
 done < <(find "$ROOT/scripts" -type f -name '*.sh' -print0)
 
-# Compile source text only; PYTHONDONTWRITEBYTECODE avoids persistent noise.
 export PYTHONDONTWRITEBYTECODE=1
 while IFS= read -r -d '' pyfile; do
   if python3 - "$pyfile" <<'PY'
@@ -78,7 +77,7 @@ PY
   fi
 done < <(find "$ROOT/scripts" -type f -name '*.py' -print0)
 
-section "3. Pin historical upstream patch source"
+section "3. Pin exact upstream patch source"
 if [ "$PREPARE_PATCH_REPO" = "1" ]; then
   if PATCH_REPO="$PATCH_REPO" bash "$ROOT/scripts/prepare_patch_repo.sh"; then
     ok "pinned patch source prepared"
@@ -144,8 +143,6 @@ section "6. Persistent restart artifacts"
 if [ -f "$PERSIST/vllm.tar.gz" ]; then
   size="$(du -h "$PERSIST/vllm.tar.gz" | cut -f1)"
   ok "vLLM venv snapshot exists ($size)"
-  # tar -tf reads the complete archive without extracting. Also ensure the
-  # package locations required after restart are actually represented.
   if tar -tf "$PERSIST/vllm.tar.gz" >/tmp/vllm-tar-list.$$ 2>/tmp/vllm-tar-error.$$; then
     ok "vLLM venv tar archive readable"
     for needle in \
@@ -183,10 +180,6 @@ done
 section "7. Persistent storage headroom"
 df -h /mnt/workspace 2>/dev/null || true
 free -h 2>/dev/null || true
-
-# The CPU instance may not expose /dev/shm exactly like the GPU instance, so
-# report rather than gate it here. The GPU-side runtime audit/serve checks the
-# 16 GB sandbox-specific constraint again.
 if [ -d /dev/shm ]; then
   df -h /dev/shm || true
 fi
@@ -210,6 +203,7 @@ After switching to the GPU instance:
   3. Agent: python3 scripts/audit_runtime.py
   4. Agent: start the default dsflash service, then run docs/GPU_VALIDATION_PLAN.md.
 
-Do not reinstall or migrate to current upstream main unless audit/recovery proves
-the persistent stable venv is missing or invalid.
+Do not reinstall the stable dev306 venv or overwrite it with an upstream dev229
+production-runtime experiment unless audit/recovery proves the persistent stable
+venv is missing or invalid. Any dev229 comparison belongs in a second venv.
 EOF
