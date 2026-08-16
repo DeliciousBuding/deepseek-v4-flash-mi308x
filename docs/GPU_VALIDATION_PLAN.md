@@ -235,7 +235,7 @@ Re-run this phase only after a material scheduler, KV-offload or DSpark change.
 Continue to watch preemptions, HBM high-water, restored/offloaded bytes and any
 engine error.
 
-## Phase 6 — 512K configured-ceiling overhead
+## Phase 6 — 512K configured-ceiling overhead (completed)
 
 Paged KV means a short request does not reserve 512K token blocks just because
 `max_model_len` is 524,288. But the larger configured bound can still affect
@@ -262,6 +262,20 @@ Use identical 8K / 32K / 100K prompts and compare startup time, TTFT, decode,
 HBM high-water and admitted concurrency. Keep 524,288 unless it produces a real
 short-request regression that is large enough to justify a more complex serving
 profile; the product requirement remains approximately 500K context.
+
+The clean-restart result retained 524,288:
+
+```text
+MAX_MODEL_LEN        actual 7,879    actual 31,399    actual 98,039    VRAM used
+524288                    2.096s            8.852s           30.316s     ~194.26 GB
+393216                    2.096s            8.849s           30.328s     ~193.19 GB
+262144                    2.096s            8.860s           30.354s     ~192.75 GB
+```
+
+All formal requests had zero cached tokens and zero preemptions. Smaller ceilings
+saved only about 1.1-1.5 GB and did not improve TTFT, so losing 500K-class
+admission has no compensating benefit. Re-run only after a material planner,
+scheduler or KV-allocation change.
 
 ## Phase 7 — long-context correctness, not just survival
 

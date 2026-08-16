@@ -213,6 +213,28 @@ from the cold-start comparison. The uncontaminated production control retained
 95.46% of per-request prompt tokens with 0.388s average hot TTFT. The matrix
 therefore keeps K7 + 12 GB CPU-KV as the production default.
 
+### Configured context-ceiling overhead
+
+The 262,144 / 393,216 / 524,288 ceilings were compared after clean restarts with
+the same K7 + CPU-KV + 3,072 scheduler profile. Each formal request used a unique
+cache salt, and a separate 8K request absorbed first-request JIT before sampling.
+
+| `MAX_MODEL_LEN` | 7,879-token TTFT | 31,399-token TTFT | 98,039-token TTFT | observed VRAM used |
+| ---: | ---: | ---: | ---: | ---: |
+| **524,288** | **2.096s** | 8.852s | **30.316s** | ~194.26 GB |
+| 393,216 | **2.096s** | **8.849s** | 30.328s | ~193.19 GB |
+| 262,144 | **2.096s** | 8.860s | 30.354s | ~192.75 GB |
+
+All formal samples reported zero cached prompt tokens and zero preemptions.
+The largest short/medium-prompt difference from the required 524K ceiling was
+about 0.13%, while the smaller ceilings saved only about 1.1-1.5 GB of observed
+VRAM. They therefore provide no useful latency trade in exchange for removing
+the required 500K-class admission. The production ceiling remains 524,288.
+
+The first request after each candidate restart was about 5.64s at 8K before
+returning to about 2.10s. That was repeatable first-use JIT, not a ceiling
+effect; `bench_configured_ceiling.py` now performs this warm-up by default.
+
 ## Local single-stream decode
 
 | Output | Total time incl. TTFT | tok/s incl. TTFT |

@@ -85,6 +85,11 @@ def parse_arguments() -> argparse.Namespace:
         type=Path,
         help="optional path for machine-readable samples and summaries",
     )
+    argument_parser.add_argument(
+        "--skip-warmup",
+        action="store_true",
+        help="skip the default isolated 8K first-request JIT warm-up",
+    )
     return argument_parser.parse_args()
 
 
@@ -191,6 +196,19 @@ def main() -> int:
         validate_arguments(arguments)
     except ValueError as error:
         raise SystemExit(str(error)) from error
+
+    if not arguments.skip_warmup:
+        warmup_target_prompt_tokens = min(arguments.prompt_tokens)
+        warmup_sample = measure_prompt(
+            target_prompt_tokens=warmup_target_prompt_tokens,
+            output_tokens=min(arguments.output_tokens, 16),
+        )
+        print(
+            f"warmup_target={warmup_target_prompt_tokens} "
+            f"prompt={warmup_sample.measured_prompt_tokens} "
+            f"TTFT={warmup_sample.time_to_first_token_seconds:.3f}s",
+            flush=True,
+        )
 
     preemptions_before = read_preemption_count()
     all_samples: list[PromptSample] = []

@@ -625,3 +625,36 @@ The production decision remains K7 + 12 GB native CPU-KV. After the matrix, the
 service was restored to that profile and passed the 18/18 runtime audit, health,
 141.9 tok/s decode-512, 129.2/236.0/374.8/549.2 tok/s C1-C8 and zero-preemption
 checks.
+
+## 22. Configured context-ceiling overhead
+
+The next control tested whether the required 524,288-token configured ceiling
+adds measurable cost to ordinary prompts. The service received clean restarts at
+262,144, 393,216 and 524,288 while keeping K7, CPU-KV 12 GB, the pinned 16 GB GPU
+pool and the 3,072 scheduler profile fixed.
+
+`bench_configured_ceiling.py` generated approximately 8K/32K/100K prompts and
+assigned every request a unique cache salt. The first candidate run exposed a
+separate first-request JIT tax: the first 8K request took about 5.64s TTFT and
+the next took about 2.10s. That sample was rejected from the ceiling comparison,
+and the harness now performs an isolated warm-up before formal measurements.
+
+Warm-runtime medians from two cold-cache samples per prompt were:
+
+| Ceiling | actual 7,879 | actual 31,399 | actual 98,039 | observed VRAM used |
+| ---: | ---: | ---: | ---: | ---: |
+| **524,288** | **2.096s** | 8.852s | **30.316s** | ~194.26 GB |
+| 393,216 | **2.096s** | **8.849s** | 30.328s | ~193.19 GB |
+| 262,144 | **2.096s** | 8.860s | 30.354s | ~192.75 GB |
+
+Every formal request reported zero cached tokens and the preemption delta stayed
+zero. Decode medians were also flat within fixture variance. Reducing the ceiling
+saved only about 1.1-1.5 GB of observed VRAM and did not improve TTFT; the largest
+measured short/medium-prompt change was about 0.13% and was in the slower
+direction. Because the smaller candidates also remove the required 500K-class
+admission, 524,288 remains the production ceiling.
+
+After restoration with no environment overrides, the service again passed the
+18/18 runtime audit, health, 141.8 tok/s decode-512, 129.3/233.1/376.1/549.2
+tok/s C1-C8 and zero-preemption checks. The C2 point is normal single-run fixture
+variance and remains within the established production band.
