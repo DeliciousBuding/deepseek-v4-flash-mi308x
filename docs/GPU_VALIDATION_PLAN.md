@@ -194,7 +194,7 @@ documentation says dynamic speculative decoding is tested with
 Eagle/Eagle3/DFlash; other methods may not work out of the box. The pinned
 dev306 DSpark path must be checked before using dynamic K in production.
 
-## Phase 5 — prefix cache matrix: DSpark x CPU-KV
+## Phase 5 — prefix cache matrix: DSpark x CPU-KV (completed)
 
 There are open vLLM bug reports around DeepSeek V4 + DSpark hybrid KV groups
 vetoing prefix reuse, and separate external-offload paths reporting zero external
@@ -202,7 +202,8 @@ prefix-cache hits. Those reports are not identical to this project's patched
 native CPU-KV path, and our previous local cache numbers are strong, but the
 interaction must be tested explicitly after restart.
 
-Run the agent trace and 4-session trace for all four combinations:
+The 2026-08-16 clean-restart control ran the 4-session trace for all four
+combinations, plus fixed decode and representative 30-turn traces:
 
 | DSpark | CPU KV | Purpose |
 | --- | --- | --- |
@@ -211,13 +212,28 @@ Run the agent trace and 4-session trace for all four combinations:
 | on | off | isolate CPU tier |
 | off | off | simplest GPU-only/native baseline |
 
+```text
+                         decode-512    4x8 cache    hot TTFT p95    stream decode median
+K7 + CPU KV 12 GB             141.9       89.40%          2.904s                  79.3 tok/s
+K7 + GPU-only                 142.0       89.45%          4.463s                  80.2 tok/s
+native + CPU KV 12 GB          33.5       89.56%          2.863s                  30.5 tok/s
+native + GPU-only              33.4       89.63%          2.814s                  29.5 tok/s
+```
+
+All four 4x8 cells completed 32/32 requests with zero preemptions. Natural EOS
+made aggregate completion counts differ, so the decision uses per-stream decode,
+TTFT and cache rather than incomparable aggregate throughput. The CPU tier had
+no fixed-decode tax, while cumulative counters at the end of K7 control sampling
+reported 13.06 GB moved to CPU and 74.2 MB restored. GPU-only K7 passed 500K but
+did not improve decode and had the worse 4-session tail. Keep K7 + 12 GB CPU-KV.
+
 Use per-request `prompt_tokens_details.cached_tokens` as the authoritative
 request-level cache measurement. Global Prometheus cache counters are diagnostic
 only under concurrent traffic.
 
-Also watch preemptions, HBM high-water, restored/offloaded bytes and any engine
-error. Keep the CPU tier only if it improves long-context/multi-session capacity
-without correctness or latency regression.
+Re-run this phase only after a material scheduler, KV-offload or DSpark change.
+Continue to watch preemptions, HBM high-water, restored/offloaded bytes and any
+engine error.
 
 ## Phase 6 — 512K configured-ceiling overhead
 

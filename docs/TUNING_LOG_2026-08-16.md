@@ -591,3 +591,37 @@ be treated as parity rather than a new default. K7 remains about 4.2x faster for
 decode-512, about 28% faster at C32, and retains the lower C64 median request
 latency. The service therefore keeps DSpark K7 as the production default; native
 decode remains a controlled extreme-throughput comparison only.
+
+## 21. DSpark x CPU-KV four-cell control
+
+The next clean-restart matrix held the model, 524,288-token ceiling, 3,072-token
+scheduler profile and agent fixtures fixed while changing only the decoder and
+native CPU-KV tier:
+
+| Decoder | CPU KV | decode-512 | 4x8 cache | hot TTFT p95 | stream decode median |
+| --- | --- | ---: | ---: | ---: | ---: |
+| DSpark K7 | 12 GB | **141.9** | 89.40% | **2.904s** | 79.3 |
+| DSpark K7 | off | 142.0 | 89.45% | 4.463s | **80.2** |
+| native | 12 GB | 33.5 | 89.56% | 2.863s | **30.5** |
+| native | off | 33.4 | **89.63%** | **2.814s** | 29.5 |
+
+Throughput columns are tok/s. Every 4x8 cell completed 32/32 requests with zero
+preemptions. Aggregate session throughput is intentionally omitted because the
+fixture allows natural EOS and completion lengths differed between runs.
+
+The K7 + CPU-KV control's 30-turn trace reproduced the promoted 95.46% cache hit,
+0.388s average hot TTFT and 167.7 tok/s average decode. Native + CPU-KV retained
+95.93% with 0.455s hot TTFT but decoded at only 32.4 tok/s. A K7 GPU-only
+30-turn run started with an already-hot prompt after the context ladder, so its
+headline cache result was rejected as cold-start evidence rather than promoted.
+
+GPU-only K7 preserved the full 50K-500K context ladder, including a 79.0s 500K
+endpoint, but did not improve fixed decode and increased the measured 4-session
+TTFT p95. At the end of control sampling, vLLM's cumulative counters reported
+13.06 GB GPU-to-CPU movement and 74.2 MB restored to GPU. The tier therefore
+supplies real spill capacity without a measurable fixed-decode tax.
+
+The production decision remains K7 + 12 GB native CPU-KV. After the matrix, the
+service was restored to that profile and passed the 18/18 runtime audit, health,
+141.9 tok/s decode-512, 129.2/236.0/374.8/549.2 tok/s C1-C8 and zero-preemption
+checks.

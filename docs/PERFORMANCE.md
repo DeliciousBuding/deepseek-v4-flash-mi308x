@@ -183,6 +183,36 @@ Reproduce each profile separately with:
 python3 scripts/bench/bench_high_concurrency.py --concurrencies 32 64
 ```
 
+### DSpark x CPU-KV matrix
+
+A clean-restart four-cell control compared DSpark K7/native decode with the
+12 GB native CPU tier enabled or disabled. All cells kept the 524,288-token
+ceiling, 16 GB pinned GPU pool when offload was enabled, and the 3,072-token
+scheduler profile. The 4-session fixture completed 32/32 requests in every
+cell with zero preemptions.
+
+| Decoder | CPU tier | decode-512 | 4-session cache | hot TTFT p95 | per-stream decode median |
+| --- | --- | ---: | ---: | ---: | ---: |
+| DSpark K7 | 12 GB | **141.9 tok/s** | 89.40% | **2.904s** | 79.3 tok/s |
+| DSpark K7 | off | 142.0 tok/s | 89.45% | 4.463s | **80.2 tok/s** |
+| native | 12 GB | 33.5 tok/s | 89.56% | 2.863s | **30.5 tok/s** |
+| native | off | 33.4 tok/s | **89.63%** | **2.814s** | 29.5 tok/s |
+
+The concurrent fixture permits natural end-of-sequence, so aggregate completion
+throughput is not compared here because output lengths varied between cells.
+Fixed-length decode-512 shows no measurable CPU-tier tax. At the end of control
+sampling, the production K7 process reported cumulative movement of 13.06 GB
+from GPU to CPU and 74.2 MB restored to GPU, demonstrating that the tier provides
+real spill capacity rather than being an unused reservation. GPU-only K7 still
+passed the 50K-500K ladder, but
+its 500K endpoint was 79.0s and its 4-session TTFT tail was worse; it offered no
+promotion-worthy gain.
+
+One GPU-only 30-turn K7 trace began with an already-hot prompt and is excluded
+from the cold-start comparison. The uncontaminated production control retained
+95.46% of per-request prompt tokens with 0.388s average hot TTFT. The matrix
+therefore keeps K7 + 12 GB CPU-KV as the production default.
+
 ## Local single-stream decode
 
 | Output | Total time incl. TTFT | tok/s incl. TTFT |
