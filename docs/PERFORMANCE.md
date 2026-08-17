@@ -312,7 +312,7 @@ Steady-state decode and C8 were essentially unchanged after warm-up:
 The first 3072 decode request was polluted by inference-time Triton compilation:
 decode-128/decode-512 temporarily fell to 7.3/40.4 tok/s. The immediate rerun
 restored 124.9/141.8, and the EngineCore log explicitly reported JIT kernels. The
-runtime recovery path therefore now persists `/root/.triton` in addition to
+runtime recovery path therefore now persists `$HOME/.triton` in addition to
 COMGR/torch-extension caches and provides a representative post-start warm-up.
 
 The 3072 candidate also passed the complete product gates used in this session:

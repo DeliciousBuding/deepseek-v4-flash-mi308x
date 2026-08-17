@@ -21,7 +21,7 @@ context ceiling.
 
 The patch source is pinned by full commit SHA, the runtime is audited after
 restart, and performance changes are accepted only after end-to-end agent and
-correctness gates — not from a single tokens/s microbenchmark.
+correctness gates, not from a single tokens/s microbenchmark.
 
 ## Validated local baseline
 
@@ -128,8 +128,8 @@ rather than replaced. System Python/Torch remain untouched.
 
 ### 3. Install the pinned serving runtime
 
-Place the exact vLLM/AITER/flydsl wheels under
-`${WHEELS:-/mnt/workspace/wheels}`, then:
+Place the exact vLLM/AITER/flydsl wheels under `$WHEELS` (see the environment
+table below), then:
 
 ```bash
 bash scripts/install_vllm_nightly.sh
@@ -261,17 +261,18 @@ prefill more while giving unstable isolation results.
 
 ## Environment variables
 
-All instance-specific paths are overridable. The defaults below are the values
-used in this repository's reference sandbox; point them at your own layout.
+All instance-specific paths are overridable. The defaults below are placeholders;
+the scripts use a reference-sandbox layout that you override for your own
+environment.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MODEL_BASE` | `/mnt/workspace/models` | checkpoint directory (48 shards) |
-| `HOT_MODEL_BASE` | `/root/models` | optional local-SSD hot copy |
-| `WHEELS` | `/mnt/workspace/wheels` | pinned vLLM/AITER/flydsl wheels |
-| `PATCH_REPO` | `/mnt/workspace/deepseek-v4-flash-mi300x` | pinned patch-source checkout |
-| `PERSIST_DIR` | `/mnt/workspace/.venvs` | venv/JIT/AITER snapshots |
-| `VLLM_VENV` | `/root/.venvs/vllm` | active serving venv |
+| `MODEL_BASE` | `<persistent-storage>/models` | checkpoint directory (48 shards) |
+| `HOT_MODEL_BASE` | `<local-ssd>/models` | optional local-SSD hot copy |
+| `WHEELS` | `<persistent-storage>/wheels` | pinned vLLM/AITER/flydsl wheels |
+| `PATCH_REPO` | `<persistent-storage>/deepseek-v4-flash-mi300x` | pinned patch-source checkout |
+| `PERSIST_DIR` | `<persistent-storage>/.venvs` | venv/JIT/AITER snapshots |
+| `VLLM_VENV` | `<local-disk>/.venvs/vllm` | active serving venv |
 | `VLLM_API_KEY` / `VLLM_API_KEY_FILE` | *(unset)* | optional serving/client auth |
 | `VLLM_BASE_URL` | `http://127.0.0.1:8000` | benchmark client endpoint |
 
@@ -375,7 +376,7 @@ correctness/performance matrix.
 ## Rejected experiments on dev306
 
 Two FULL_AND_PIECEWISE graph-capture experiments were slower on this pinned
-runtime — including a second pass extended through the 4096-token chunk size —
+runtime, including a second pass extended through the 4096-token chunk size,
 while consuming additional HBM/startup time. DSpark K=5 also lost to K=7 for the
 measured single-stream path. Do not repeat those exact tests unless the runtime
 or kernel stack changes.

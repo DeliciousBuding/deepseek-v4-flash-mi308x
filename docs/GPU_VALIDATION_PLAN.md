@@ -319,7 +319,7 @@ local stable port:   vLLM dev306 + AITER 0.1.19
 
 If the local control is healthy, build a **second venv** reproducing upstream's
 actual dev229 runtime as closely as a Docker-less host permits. Do not overwrite
-`/root/.venvs/vllm`.
+`$VLLM_VENV`.
 
 Compare correctness first, then fresh prefill, C1/C8 decode, 500K viability,
 agent-session TTFT/cache and tool protocol. Promote only if the alternate runtime

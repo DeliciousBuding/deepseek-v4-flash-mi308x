@@ -41,10 +41,10 @@ Observed first-start components:
 | graph capture | ~104s |
 | engine profile + KV + warm-up | ~283.5s |
 
-The first run also generated substantial caches outside `/root/.aiter`:
+The first run also generated substantial caches outside `$HOME/.aiter`:
 
-- `/root/.cache/torch_extensions`: custom HIP/C++ extension cache;
-- `/root/.cache/comgr`: ROCm compiler/code-object cache, about 612 MB in this run.
+- `$HOME/.cache/torch_extensions`: custom HIP/C++ extension cache;
+- `$HOME/.cache/comgr`: ROCm compiler/code-object cache, about 612 MB in this run.
 
 The torch-extension cache was about 17 MB. The repository therefore persists
 both caches in addition to the optional legacy AITER cache. After warm-up, graph
@@ -332,7 +332,7 @@ benchmark never fabricates an unmatched `role=tool` message.
 Persistent model weights live on NFS. A complete ephemeral copy was staged to:
 
 ```text
-/root/models/deepseek-ai/DeepSeek-V4-Flash-0731
+$HOME/models/deepseek-ai/DeepSeek-V4-Flash-0731
 ```
 
 The staging script copies to a temporary directory, compares a complete filename + size inventory, checks all 48 shards and key metadata, then renames atomically.
@@ -517,10 +517,10 @@ The scheduler sweep exposed compiler state that vLLM's built-in warm-up did not
 cover. After a representative first request, the runtime had:
 
 ```text
-/root/.triton                 ~185 MB
-/root/.cache/comgr            ~612 MB
-/root/.cache/torch_extensions ~17 MB
-/root/.aiter                  tiny compatibility cache
+$HOME/.triton                 ~185 MB
+$HOME/.cache/comgr            ~612 MB
+$HOME/.cache/torch_extensions ~17 MB
+$HOME/.aiter                  tiny compatibility cache
 ```
 
 The recovery design was expanded accordingly:
