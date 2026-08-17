@@ -27,14 +27,14 @@ snapshot() {
   echo "OK   $label cache snapshot: $out ($(du -h "$out" | cut -f1))"
 }
 
-# bootstrap.sh restores this archive into /root/.aiter, so archive the directory
+# bootstrap.sh restores this archive into $HOME/.aiter, so archive the directory
 # contents rather than an outer .aiter directory.
-snapshot /root/.aiter "$PERSIST/aiter_cache.tar.gz" "AITER" contents
+snapshot "$HOME/.aiter" "$PERSIST/aiter_cache.tar.gz" "AITER" contents
 
 # restore_runtime.sh restores these archives into their parent directories.
 # torch_extensions contains custom HIP/C++ modules; COMGR holds ROCm compiler
 # code objects; .triton contains kernels that may otherwise JIT on the first
 # real request even after vLLM's built-in warm-up has completed.
-snapshot /root/.cache/torch_extensions "$PERSIST/torch_ext_cache.tar.gz" "torch_extensions" directory
-snapshot /root/.cache/comgr "$PERSIST/comgr_cache.tar.gz" "ROCm COMGR" directory
-snapshot /root/.triton "$PERSIST/triton_cache.tar.gz" "Triton" directory
+snapshot "$HOME/.cache/torch_extensions" "$PERSIST/torch_ext_cache.tar.gz" "torch_extensions" directory
+snapshot "$HOME/.cache/comgr" "$PERSIST/comgr_cache.tar.gz" "ROCm COMGR" directory
+snapshot "$HOME/.triton" "$PERSIST/triton_cache.tar.gz" "Triton" directory

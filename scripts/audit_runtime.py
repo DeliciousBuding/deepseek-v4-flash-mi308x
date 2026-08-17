@@ -180,8 +180,8 @@ def main() -> int:
         failures.append("sparse-prefill opus942 module missing")
 
     for path, label in [
-        (Path("/opt/cj-moe"), "JIT kernel source /opt/cj-moe"),
-        (Path("/mnt/workspace/.venvs/vllm.tar.gz"), "persistent venv snapshot"),
+        (Path(os.environ.get("JIT_KERNEL_SOURCE", "/opt/cj-moe")), "JIT kernel source"),
+        (Path(os.environ.get("PERSIST_DIR", "/mnt/workspace/.venvs")) / "vllm.tar.gz", "persistent venv snapshot"),
     ]:
         print(f"{'OK' if path.exists() else 'MISS'} {label}")
         if not path.exists():
@@ -201,15 +201,17 @@ def main() -> int:
 
     # Runtime-generated caches improve restart latency but are not correctness
     # prerequisites. A fresh GPU instance can regenerate them on first warm-up.
+    home = Path.home()
+    persist_dir = Path(os.environ.get("PERSIST_DIR", "/mnt/workspace/.venvs"))
     for path, label in [
-        (Path("/root/.aiter"), "AITER runtime cache /root/.aiter"),
-        (Path("/mnt/workspace/.venvs/aiter_cache.tar.gz"), "persistent AITER cache snapshot"),
-        (Path("/root/.cache/torch_extensions"), "torch_extensions runtime cache"),
-        (Path("/mnt/workspace/.venvs/torch_ext_cache.tar.gz"), "persistent torch_extensions snapshot"),
-        (Path("/root/.cache/comgr"), "ROCm COMGR runtime cache"),
-        (Path("/mnt/workspace/.venvs/comgr_cache.tar.gz"), "persistent ROCm COMGR snapshot"),
-        (Path("/root/.triton"), "Triton runtime cache"),
-        (Path("/mnt/workspace/.venvs/triton_cache.tar.gz"), "persistent Triton snapshot"),
+        (home / ".aiter", "AITER runtime cache"),
+        (persist_dir / "aiter_cache.tar.gz", "persistent AITER cache snapshot"),
+        (home / ".cache" / "torch_extensions", "torch_extensions runtime cache"),
+        (persist_dir / "torch_ext_cache.tar.gz", "persistent torch_extensions snapshot"),
+        (home / ".cache" / "comgr", "ROCm COMGR runtime cache"),
+        (persist_dir / "comgr_cache.tar.gz", "persistent ROCm COMGR snapshot"),
+        (home / ".triton", "Triton runtime cache"),
+        (persist_dir / "triton_cache.tar.gz", "persistent Triton snapshot"),
     ]:
         print(f"{'OK' if path.exists() else 'WARN'} {label}")
         if not path.exists():
