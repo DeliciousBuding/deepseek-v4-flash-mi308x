@@ -399,10 +399,10 @@ round 02/03/04 added:   +0.98 / +0.99 / +0.90s   (median +0.98s)
 
 So the *steady-state* always-1,024 cap is not a regression: it improves the
 late-short isolation from ~+1.30s to ~+0.98s at the cost of ~+13.5s on the 200K
-prefill (59.5s vs 46.1s). The original `+3.08s` verdict was a cold-start
-artifact. The cap was still removed because the isolation gain (+0.32s) does not
-justify a ~29% prefill-throughput loss, and it still misses the +0.5s gate. The
-production scheduler source is unchanged.
+prefill (59.5s vs 46.1s, ~29% prefill-time increase / ~22% throughput loss). The
+original `+3.08s` verdict was a cold-start artifact. The cap was still removed
+because the isolation gain (+0.32s) does not justify that prefill cost, and it
+still misses the +0.5s gate. The production scheduler source is unchanged.
 
 ### 15.2 extra M~1024/1031/1032 tuning
 

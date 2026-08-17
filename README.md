@@ -41,7 +41,8 @@ Measured on the MI308X profile in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md):
 | Cold 200K-prefill isolation | **+1.30 / +1.33 / +1.41s** at 3072; still above the +0.5s gate |
 | Same-instance staged model load | **~36–43s** after local SSD/page-cache warm-up (169.7s original NFS control) |
 
-The performance profile now includes **MI308X-specific 80-CU AITER tables**.
+The performance profile now includes **MI308X-specific 80-CU AITER tables**
+(see [`tuning/README.md`](tuning/README.md)).
 The complete 2026-08-16 experiment trail, including rejected candidates and raw
 operator/service numbers, is recorded in [`docs/TUNING_LOG_2026-08-16.md`](docs/TUNING_LOG_2026-08-16.md).
 Correctness/tool/context gates pass; cold long-prefill tail-latency isolation is
